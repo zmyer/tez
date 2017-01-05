@@ -16,19 +16,22 @@
  * limitations under the License.
  */
 
-package org.apache.tez.runtime.api.impl;
+option java_package = "org.apache.tez.dag.library.vertexmanager";
+option java_outer_classname = "FairShuffleUserPayloads";
+option java_generate_equals_and_hash = true;
 
-public enum EventType {
-  TASK_ATTEMPT_COMPLETED_EVENT,
-  TASK_ATTEMPT_FAILED_EVENT,
-  TASK_ATTEMPT_KILLED_EVENT,
-  DATA_MOVEMENT_EVENT,
-  INPUT_READ_ERROR_EVENT,
-  INPUT_FAILED_EVENT,
-  TASK_STATUS_UPDATE_EVENT,
-  VERTEX_MANAGER_EVENT,
-  ROOT_INPUT_DATA_INFORMATION_EVENT,
-  COMPOSITE_DATA_MOVEMENT_EVENT,
-  ROOT_INPUT_INITIALIZER_EVENT,
-  COMPOSITE_ROUTED_DATA_MOVEMENT_EVENT,
+message RangeProto {
+  optional int32 first_index = 1;
+  optional int32 num_of_indexes = 2;
+}
+
+message FairShuffleEdgeManagerDestinationTaskPropProto {
+  optional int32 destination_task_index = 1;
+  optional RangeProto partitions = 2;
+  optional RangeProto source_tasks = 3;
+}
+
+message FairShuffleEdgeManagerConfigPayloadProto {
+  optional int32 num_buckets = 1;
+  repeated FairShuffleEdgeManagerDestinationTaskPropProto destinationTaskProps = 2;
 }
