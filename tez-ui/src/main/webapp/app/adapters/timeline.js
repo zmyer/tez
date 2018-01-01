@@ -33,11 +33,22 @@ export default AbstractAdapter.extend({
     attemptID: 'TEZ_TASK_ATTEMPT_ID',
     hiveQueryID: 'HIVE_QUERY_ID',
     appID: 'applicationId',
+    DAG_ID: "DAG_ID",
+    APP_ID: "APP_ID",
 
     dagName: 'dagName',
     user: "user",
     status: "status",
-    callerID: "callerId"
+    callerID: "callerId",
+    requestuser: "requestuser",
+    executionMode: "executionmode",
+    callerId: "callerId",
+    queueName: "queueName",
+
+    tablesRead: "tablesread",
+    tablesWritten: "tableswritten",
+    operationID: "operationid",
+    queue: "queue",
   },
 
   stringifyFilters: function (filters) {
@@ -61,7 +72,7 @@ export default AbstractAdapter.extend({
       var filter = this.get(`filters.${key}`);
 
       if(filter) {
-        if(!primaryFilter) {
+        if(!primaryFilter && !(filter === 'status' && value === 'RUNNING')) {
           primaryFilter = {};
           primaryFilter[filter] = value;
         }

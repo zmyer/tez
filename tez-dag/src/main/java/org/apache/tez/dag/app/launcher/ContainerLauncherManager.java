@@ -26,6 +26,7 @@ import org.apache.hadoop.yarn.event.Event;
 import org.apache.hadoop.yarn.event.EventHandler;
 import org.apache.tez.Utils;
 import org.apache.tez.common.ReflectionUtils;
+import org.apache.tez.common.security.JobTokenSecretManager;
 import org.apache.tez.dag.api.NamedEntityDescriptor;
 import org.apache.tez.dag.api.TezConstants;
 import org.apache.tez.dag.api.TezException;
@@ -33,6 +34,7 @@ import org.apache.tez.dag.api.UserPayload;
 import org.apache.tez.dag.app.ServicePluginLifecycleAbstractService;
 import org.apache.tez.dag.app.dag.event.DAGAppMasterEventType;
 import org.apache.tez.dag.app.dag.event.DAGAppMasterEventUserServiceFatalError;
+import org.apache.tez.dag.records.TezDAGID;
 import org.apache.tez.serviceplugins.api.ContainerLaunchRequest;
 import org.apache.tez.serviceplugins.api.ContainerLauncher;
 import org.apache.tez.serviceplugins.api.ContainerLauncherContext;
@@ -41,7 +43,6 @@ import org.apache.tez.dag.api.TezUncheckedException;
 import org.apache.tez.dag.app.AppContext;
 import org.apache.tez.dag.app.ContainerLauncherContextImpl;
 import org.apache.tez.dag.app.TaskCommunicatorManagerInterface;
-import org.apache.tez.dag.app.dag.DAG;
 import org.apache.tez.dag.app.rm.ContainerLauncherEvent;
 import org.apache.tez.dag.app.rm.ContainerLauncherLaunchRequestEvent;
 import org.apache.tez.serviceplugins.api.DagInfo;
@@ -74,9 +75,9 @@ public class ContainerLauncherManager extends AbstractService
 
     this.isIncompleteCtor = false;
     this.appContext = context;
-    Preconditions.checkArgument(
-        containerLauncherDescriptors != null && !containerLauncherDescriptors.isEmpty(),
-        "ContainerLauncherDescriptors must be specified");
+    if (containerLauncherDescriptors == null || containerLauncherDescriptors.isEmpty()) {
+      throw new IllegalArgumentException("ContainerLauncherDescriptors must be specified");
+    }
     containerLauncherContexts = new ContainerLauncherContext[containerLauncherDescriptors.size()];
     containerLaunchers = new ContainerLauncherWrapper[containerLauncherDescriptors.size()];
     containerLauncherServiceWrappers = new ServicePluginLifecycleAbstractService[containerLauncherDescriptors.size()];
@@ -145,7 +146,7 @@ public class ContainerLauncherManager extends AbstractService
                                                 AppContext context,
                                                 TaskCommunicatorManagerInterface taskCommunicatorManagerInterface,
                                                 String workingDirectory,
-                                                boolean isLocalMode) {
+                                                boolean isLocalMode) throws TezException {
     LOG.info("Creating LocalContainerLauncher");
     // TODO Post TEZ-2003. LocalContainerLauncher is special cased, since it makes use of
     // extensive internals which are only available at runtime. Will likely require
@@ -193,8 +194,10 @@ public class ContainerLauncherManager extends AbstractService
     }
   }
 
-  public void dagComplete(DAG dag) {
-    // Nothing required at the moment. Containers are shared across DAGs
+  public void dagComplete(TezDAGID dag, JobTokenSecretManager secretManager) {
+    for (int i = 0 ; i < containerLaunchers.length ; i++) {
+      containerLaunchers[i].dagComplete(dag, secretManager);
+    }
   }
 
   public void dagSubmitted() {

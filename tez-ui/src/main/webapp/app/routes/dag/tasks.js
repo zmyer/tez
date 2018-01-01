@@ -19,8 +19,15 @@
 import Ember from 'ember';
 import MultiAmPollsterRoute from '../multi-am-pollster';
 
+import virtualAnchor from '../../utils/virtual-anchor';
+
 export default MultiAmPollsterRoute.extend({
-  title: "All Tasks",
+  title: Ember.computed(function () {
+    var dag = this.modelFor("dag"),
+      name = dag.get("name"),
+      entityID = dag.get("entityID");
+    return `All Tasks: ${name} (${entityID})`;
+  }).volatile(),
 
   loaderNamespace: "dag",
 
@@ -33,5 +40,23 @@ export default MultiAmPollsterRoute.extend({
     return this.get("loader").query('task', {
       dagID: this.modelFor("dag").get("id")
     }, options);
+  },
+
+  actions: {
+    logCellClicked: function (attemptID, download) {
+      var that = this;
+      return this.get("loader").queryRecord('attempt', attemptID).then(function (attempt) {
+        var logURL = attempt.get("logURL");
+        if(logURL) {
+          return virtualAnchor(logURL, download ? attempt.get("entityID") : undefined);
+        }
+        else {
+          that.send("openModal", {
+            title: "Log Link Not Available!",
+            content: `Log is missing for task attempt : ${attemptID}!`
+          });
+        }
+      });
+    }
   }
 });

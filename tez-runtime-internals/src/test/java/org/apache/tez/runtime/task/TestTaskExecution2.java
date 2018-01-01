@@ -14,9 +14,7 @@
 
 package org.apache.tez.runtime.task;
 
-import static org.apache.tez.runtime.task.TaskExecutionTestHelpers.createProcessorIOException;
-import static org.apache.tez.runtime.task.TaskExecutionTestHelpers.createProcessorTezException;
-import static org.apache.tez.runtime.task.TaskExecutionTestHelpers.createTaskReporter;
+import static org.apache.tez.runtime.task.TaskExecutionTestHelpers.*;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
@@ -35,6 +33,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -50,6 +49,8 @@ import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
+import org.apache.tez.common.TezExecutors;
+import org.apache.tez.common.TezSharedExecutor;
 import org.apache.tez.common.counters.CounterGroup;
 import org.apache.tez.common.counters.FileSystemCounter;
 import org.apache.tez.common.counters.TaskCounter;
@@ -305,6 +306,43 @@ public class TestTaskExecution2 {
       // Failure detected as a result of fall off from the run method. abort isn't required.
       assertFalse(TestProcessor.wasAborted());
       assertTrue(taskRunner.task.getCounters().countCounters() != 0);
+    } finally {
+      executor.shutdownNow();
+    }
+  }
+
+  // test that makes sure errors aren't reported when the container is already failing
+  @Test(timeout = 5000)
+  public void testIgnoreErrorsDuringFailure() throws IOException, InterruptedException, TezException,
+      ExecutionException {
+
+    ListeningExecutorService executor = null;
+    try {
+      ExecutorService rawExecutor = Executors.newFixedThreadPool(1);
+      executor = MoreExecutors.listeningDecorator(rawExecutor);
+      ApplicationId appId = ApplicationId.newInstance(10000, 1);
+      TaskExecutionTestHelpers.TezTaskUmbilicalForTest
+          umbilical = new TaskExecutionTestHelpers.TezTaskUmbilicalForTest();
+
+      TaskReporter taskReporter = new TaskReporter(umbilical, 100, 1000, 100, new AtomicLong(0),
+        createContainerId(appId).toString()) {
+        @Override
+        protected boolean isShuttingDown() {
+          return true;
+        }
+      };
+
+      TezTaskRunner2 taskRunner = createTaskRunner(appId, umbilical, taskReporter, executor,
+          TestProcessor.CONF_THROW_IO_EXCEPTION);
+      // Setup the executor
+
+      taskExecutor.submit(new TaskRunnerCallable2ForTest(taskRunner));
+
+      // Signal the processor to go through
+      TestProcessor.awaitStart();
+      TestProcessor.signal();
+
+      umbilical.verifyNoCompletionEvents();
     } finally {
       executor.shutdownNow();
     }
@@ -742,19 +780,21 @@ public class TestTaskExecution2 {
         new TaskSpec(taskAttemptId, "dagName", "vertexName", -1, processorDescriptor,
             new ArrayList<InputSpec>(), new ArrayList<OutputSpec>(), null, null);
 
+    TezExecutors sharedExecutor = new TezSharedExecutor(tezConf);
     TezTaskRunner2 taskRunner;
     if (testRunner) {
       taskRunner = new TezTaskRunner2ForTest(tezConf, ugi, localDirs, taskSpec, 1,
           new HashMap<String, ByteBuffer>(), new HashMap<String, String>(),
           HashMultimap.<String, String>create(), taskReporter,
           executor, null, "", new ExecutionContextImpl("localhost"),
-          Runtime.getRuntime().maxMemory(), updateSysCounters);
+          Runtime.getRuntime().maxMemory(), updateSysCounters, sharedExecutor);
     } else {
       taskRunner = new TezTaskRunner2(tezConf, ugi, localDirs, taskSpec, 1,
           new HashMap<String, ByteBuffer>(), new HashMap<String, String>(),
           HashMultimap.<String, String>create(), taskReporter,
           executor, null, "", new ExecutionContextImpl("localhost"),
-          Runtime.getRuntime().maxMemory(), updateSysCounters, new DefaultHadoopShim());
+          Runtime.getRuntime().maxMemory(), updateSysCounters, new DefaultHadoopShim(),
+          sharedExecutor);
     }
 
     return taskRunner;
@@ -779,10 +819,12 @@ public class TestTaskExecution2 {
                                  String pid,
                                  ExecutionContext executionContext,
                                  long memAvailable,
-                                 boolean updateSysCounters) throws IOException {
+                                 boolean updateSysCounters,
+                                 TezExecutors sharedExecutor) throws IOException {
       super(tezConf, ugi, localDirs, taskSpec, appAttemptNumber, serviceConsumerMetadata,
           serviceProviderEnvMap, startedInputsMap, taskReporter, executor, objectRegistry, pid,
-          executionContext, memAvailable, updateSysCounters, new DefaultHadoopShim());
+          executionContext, memAvailable, updateSysCounters, new DefaultHadoopShim(),
+          sharedExecutor);
     }
 
 

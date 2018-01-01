@@ -35,6 +35,7 @@ test('Basic creation test', function(assert) {
 
     assert.ok(!!model);
     assert.ok(!!model.needs.am);
+    assert.ok(!!model.needs.info);
     assert.equal(model.get("queue"), testQueue);
   });
 
@@ -56,5 +57,101 @@ test('Basic creation test', function(assert) {
   assert.ok(model.callerDescription);
   assert.ok(model.callerType);
 
+  assert.ok(model.dagPlan);
+  assert.ok(model.callerData);
+  assert.ok(model.info);
+
   assert.ok(model.amWsVersion);
+  assert.ok(model.failedTaskAttempts);
+  assert.ok(model.finalStatus);
+});
+
+test('app loadType test', function(assert) {
+  let loadType = this.subject().get("needs.app.loadType"),
+      record = Ember.Object.create();
+
+  assert.equal(loadType(record), undefined);
+
+  record.set("queueName", "Q");
+  assert.equal(loadType(record), "demand");
+
+  record.set("atsStatus", "RUNNING");
+  assert.equal(loadType(record), undefined);
+
+  record.set("atsStatus", "SUCCEEDED");
+  assert.equal(loadType(record), "demand");
+
+  record.set("queueName", undefined);
+  assert.equal(loadType(record), undefined);
+});
+
+test('status test', function(assert) {
+  let model = this.subject();
+
+  Ember.run(function () {
+    model.set("status", "SUCCEEDED");
+    assert.equal(model.get("status"), "SUCCEEDED");
+    assert.equal(model.get("finalStatus"), "SUCCEEDED");
+
+    model.set("failedTaskAttempts", 1);
+    assert.equal(model.get("status"), "SUCCEEDED");
+    assert.equal(model.get("finalStatus"), "SUCCEEDED_WITH_FAILURES");
+  });
+});
+
+test('queue test', function(assert) {
+  let model = this.subject(),
+      queueName = "queueName",
+      appQueueName = "AppQueueName";
+
+  assert.equal(model.get("queue"), undefined);
+
+  Ember.run(function () {
+    model.set("app", {
+      queue: appQueueName
+    });
+    assert.equal(model.get("queue"), appQueueName);
+
+    model.set("queueName", queueName);
+    assert.equal(model.get("queue"), queueName);
+  });
+});
+
+test('vertices, edges & vertexGroups test', function(assert) {
+  let testVertices = {},
+      testEdges = {},
+      testVertexGroups = {},
+      model = this.subject({
+        dagPlan: {
+          vertices: testVertices,
+          edges: testEdges,
+          vertexGroups: testVertexGroups
+        }
+      });
+
+  assert.equal(model.get("vertices"), testVertices);
+  assert.equal(model.get("edges"), testEdges);
+  assert.equal(model.get("vertexGroups"), testVertexGroups);
+
+  Ember.run(function () {
+    testVertices = {};
+    testEdges = {};
+    testVertexGroups = {};
+
+    model.set("info", {
+      dagPlan: {
+        vertices: testVertices,
+        edges: testEdges,
+        vertexGroups: testVertexGroups
+      }
+    });
+    assert.notEqual(model.get("vertices"), testVertices);
+    assert.notEqual(model.get("edges"), testEdges);
+    assert.notEqual(model.get("vertexGroups"), testVertexGroups);
+
+    model.set("dagPlan", null);
+    assert.equal(model.get("vertices"), testVertices);
+    assert.equal(model.get("edges"), testEdges);
+    assert.equal(model.get("vertexGroups"), testVertexGroups);
+  });
 });

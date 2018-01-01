@@ -89,6 +89,8 @@ import org.apache.tez.dag.app.rm.node.AMNodeEventTaskAttemptEnded;
 import org.apache.tez.dag.app.rm.node.AMNodeEventTaskAttemptSucceeded;
 import org.apache.tez.dag.app.web.WebUIService;
 import org.apache.tez.dag.records.TaskAttemptTerminationCause;
+import org.apache.tez.hadoop.shim.HadoopShim;
+import org.apache.tez.hadoop.shim.HadoopShimsLoader;
 
 import com.google.common.base.Preconditions;
 
@@ -132,6 +134,7 @@ public class TaskSchedulerManager extends AbstractService implements
   // Custom AppIds to avoid container conflicts if there's multiple sources
   private final long SCHEDULER_APP_ID_BASE = 111101111;
   private final long SCHEDULER_APP_ID_INCREMENT = 111111111;
+  private final HadoopShim hadoopShim;
 
   BlockingQueue<AMSchedulerEvent> eventQueue
                               = new LinkedBlockingQueue<AMSchedulerEvent>();
@@ -160,6 +163,7 @@ public class TaskSchedulerManager extends AbstractService implements
     this.webUI = null;
     this.historyUrl = null;
     this.isLocalMode = false;
+    this.hadoopShim = new HadoopShimsLoader(appContext.getAMConf()).getHadoopShim();
   }
 
   /**
@@ -179,7 +183,8 @@ public class TaskSchedulerManager extends AbstractService implements
                               ContainerSignatureMatcher containerSignatureMatcher,
                               WebUIService webUI,
                               List<NamedEntityDescriptor> schedulerDescriptors,
-                              boolean isLocalMode) {
+                              boolean isLocalMode,
+                              HadoopShim hadoopShim) {
     super(TaskSchedulerManager.class.getName());
     Preconditions.checkArgument(schedulerDescriptors != null && !schedulerDescriptors.isEmpty(),
         "TaskSchedulerDescriptors must be specified");
@@ -190,6 +195,7 @@ public class TaskSchedulerManager extends AbstractService implements
     this.webUI = webUI;
     this.historyUrl = getHistoryUrl();
     this.isLocalMode = isLocalMode;
+    this.hadoopShim = hadoopShim;
     this.appCallbackExecutor = createAppCallbackExecutorService();
     if (this.webUI != null) {
       this.webUI.setHistoryUrl(this.historyUrl);
@@ -258,6 +264,9 @@ public class TaskSchedulerManager extends AbstractService implements
     switch (sEvent.getType()) {
     case S_TA_LAUNCH_REQUEST:
       handleTaLaunchRequest((AMSchedulerEventTALaunchRequest) sEvent);
+      break;
+    case S_TA_STATE_UPDATED:
+      handleTAStateUpdated((AMSchedulerEventTAStateUpdated) sEvent);
       break;
     case S_TA_ENDED: // TaskAttempt considered complete.
       AMSchedulerEventTAEnded event = (AMSchedulerEventTAEnded)sEvent;
@@ -521,6 +530,23 @@ public class TaskSchedulerManager extends AbstractService implements
     }
   }
 
+  private void handleTAStateUpdated(AMSchedulerEventTAStateUpdated event) {
+    try {
+      taskSchedulers[event.getSchedulerId()].taskStateUpdated(event.getTaskAttempt(), event.getState());
+    } catch (Exception e) {
+      String msg = "Error in TaskScheduler for handling Task State Update"
+          + ", eventType=" + event.getType()
+          + ", scheduler=" + Utils.getTaskSchedulerIdentifierString(event.getSchedulerId(), appContext)
+          + ", taskAttemptId=" + event.getTaskAttempt().getID()
+          + ", state=" + event.getState();
+      LOG.error(msg, e);
+      sendEvent(
+          new DAGAppMasterEventUserServiceFatalError(
+              DAGAppMasterEventType.TASK_SCHEDULER_SERVICE_FATAL_ERROR,
+              msg, e));
+    }
+  }
+
   @VisibleForTesting
   TaskScheduler createTaskScheduler(String host, int port, String trackingUrl,
                                     AppContext appContext,
@@ -658,12 +684,14 @@ public class TaskSchedulerManager extends AbstractService implements
 
   public void initiateStop() {
     for (int i = 0 ; i < taskSchedulers.length ; i++) {
-      try {
-        taskSchedulers[i].getTaskScheduler().initiateStop();
-      } catch (Exception e) {
-        // Ignore for now as scheduler stop invoked on shutdown
-        LOG.error("Failed to do a clean initiateStop for Scheduler: "
-            + Utils.getTaskSchedulerIdentifierString(i, appContext), e);
+      if (taskSchedulers[i] != null) {
+        try {
+          taskSchedulers[i].getTaskScheduler().initiateStop();
+        } catch (Exception e) {
+          // Ignore for now as scheduler stop invoked on shutdown
+          LOG.error("Failed to do a clean initiateStop for Scheduler: "
+              + Utils.getTaskSchedulerIdentifierString(i, appContext), e);
+        }
       }
     }
   }
@@ -768,9 +796,11 @@ public class TaskSchedulerManager extends AbstractService implements
       int schedulerId,
       Resource maxContainerCapability,
       Map<ApplicationAccessType, String> appAcls, 
-      ByteBuffer clientAMSecretKey) {
+      ByteBuffer clientAMSecretKey,
+      String queueName) {
     this.appContext.getClusterInfo().setMaxContainerCapability(
         maxContainerCapability);
+    this.appContext.setQueueName(queueName);
     this.appAcls = appAcls;
     this.clientService.setClientAMSecretKey(clientAMSecretKey);
   }
@@ -798,6 +828,8 @@ public class TaskSchedulerManager extends AbstractService implements
       } else {
         finishState = FinalApplicationStatus.UNDEFINED;
       }
+      finishState = hadoopShim.applyFinalApplicationStatusCorrection(finishState,
+          dagAppMaster.isSession(), appMasterState == DAGAppMasterState.ERROR);
       List<String> diagnostics = dagAppMaster.getDiagnostics();
       if(diagnostics != null) {
         for (String s : diagnostics) {
@@ -948,13 +980,21 @@ public class TaskSchedulerManager extends AbstractService implements
   }
 
   public boolean hasUnregistered() {
+    // Only return true if all task schedulers that were registered successfully unregister
+    if (taskSchedulers.length == 0) {
+      return false;
+    }
     boolean result = true;
-    for (int i = 0 ; i < taskSchedulers.length ; i++) {
+    for (int i = 0; i < taskSchedulers.length; i++) {
       // Explicitly not catching any exceptions around this API
       // No clear route to recover. Better to crash.
+      if (taskSchedulers[i] == null) {
+        return false;
+      }
       try {
         result = result & this.taskSchedulers[i].hasUnregistered();
       } catch (Exception e) {
+        result = false;
         String msg = "Error in TaskScheduler when checking if a scheduler has unregistered"
             + ", scheduler=" + Utils.getTaskSchedulerIdentifierString(i, appContext);
         LOG.error(msg, e);
@@ -988,9 +1028,17 @@ public class TaskSchedulerManager extends AbstractService implements
           .replaceAll(HISTORY_URL_BASE, historyUrlBase)
           .replaceAll("([^:])/{2,}", "$1/");
 
-      // make sure we have a valid scheme
-      if (!historyUrl.startsWith("http")) {
-        historyUrl = "http://" + historyUrl;
+      // FIXME: we should not need this check in the first place.
+      // Might be better to remove it in the next release and not fix badly configured URLs.
+      boolean checkSchemePrefix = config.getBoolean(
+          TezConfiguration.TEZ_AM_UI_HISTORY_URL_SCHEME_CHECK_ENABLED,
+          TezConfiguration.TEZ_AM_UI_HISTORY_URL_SCHEME_CHECK_ENABLED_DEFAULT);
+
+      if (checkSchemePrefix) {
+        // make sure we have a valid scheme
+        if (!historyUrl.startsWith("http")) {
+          historyUrl = "http://" + historyUrl;
+        }
       }
     }
 

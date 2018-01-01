@@ -25,6 +25,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Random;
 
+import org.apache.tez.dag.api.TezConfiguration;
 import org.apache.tez.hadoop.shim.DefaultHadoopShim;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -53,6 +54,7 @@ import org.apache.hadoop.yarn.util.AuxiliaryServiceHelper;
 import org.apache.tez.common.MRFrameworkConfigs;
 import org.apache.tez.common.TezUtils;
 import org.apache.tez.common.TezRuntimeFrameworkConfigs;
+import org.apache.tez.common.TezSharedExecutor;
 import org.apache.tez.common.security.JobTokenIdentifier;
 import org.apache.tez.dag.api.ProcessorDescriptor;
 import org.apache.tez.mapreduce.TezTestUtils;
@@ -200,7 +202,7 @@ public class MapUtils {
       JobConf jobConf, int mapId, Path mapInput,
       TezUmbilical umbilical, String dagName,
       String vertexName, List<InputSpec> inputSpecs,
-      List<OutputSpec> outputSpecs) throws Exception {
+      List<OutputSpec> outputSpecs, TezSharedExecutor sharedExecutor) throws Exception {
     jobConf.setInputFormat(SequenceFileInputFormat.class);
 
     ProcessorDescriptor mapProcessorDesc = ProcessorDescriptor.create(
@@ -217,12 +219,14 @@ public class MapUtils {
         outputSpecs, null, null);
 
     Map<String, ByteBuffer> serviceConsumerMetadata = new HashMap<String, ByteBuffer>();
-    serviceConsumerMetadata.put(ShuffleUtils.SHUFFLE_HANDLER_SERVICE_ID,
+    String auxiliaryService = jobConf.get(TezConfiguration.TEZ_AM_SHUFFLE_AUXILIARY_SERVICE_ID,
+        TezConfiguration.TEZ_AM_SHUFFLE_AUXILIARY_SERVICE_ID_DEFAULT);
+    serviceConsumerMetadata.put(auxiliaryService,
         ShuffleUtils.convertJobTokenToBytes(shuffleToken));
     Map<String, String> envMap = new HashMap<String, String>();
     ByteBuffer shufflePortBb = ByteBuffer.allocate(4).putInt(0, 8000);
     AuxiliaryServiceHelper
-        .setServiceDataIntoEnv(ShuffleUtils.SHUFFLE_HANDLER_SERVICE_ID, shufflePortBb,
+        .setServiceDataIntoEnv(auxiliaryService, shufflePortBb,
             envMap);
 
     LogicalIOProcessorRuntimeTask task = new LogicalIOProcessorRuntimeTask(
@@ -234,7 +238,7 @@ public class MapUtils {
         serviceConsumerMetadata,
         envMap,
         HashMultimap.<String, String>create(), null, "", new ExecutionContextImpl("localhost"),
-        Runtime.getRuntime().maxMemory(), true, new DefaultHadoopShim());
+        Runtime.getRuntime().maxMemory(), true, new DefaultHadoopShim(), sharedExecutor);
     return task;
   }
 }

@@ -65,15 +65,18 @@ public class SimpleFetchedInputAllocator implements FetchedInputAllocator,
   
   private volatile long usedMemory = 0;
 
-  public SimpleFetchedInputAllocator(String srcNameTrimmed, String uniqueIdentifier, Configuration conf,
-      long maxTaskAvailableMemory, long memoryAvailable) {
+  public SimpleFetchedInputAllocator(String srcNameTrimmed,
+                                     String uniqueIdentifier, int dagID,
+                                     Configuration conf,
+                                     long maxTaskAvailableMemory,
+                                     long memoryAvailable) {
     this.srcNameTrimmed = srcNameTrimmed;
     this.conf = conf;    
     this.maxAvailableTaskMemory = maxTaskAvailableMemory;
     this.initialMemoryAvailable = memoryAvailable;
     
     this.fileNameAllocator = new TezTaskOutputFiles(conf,
-        uniqueIdentifier);
+        uniqueIdentifier, dagID);
     this.localDirAllocator = new LocalDirAllocator(TezRuntimeFrameworkConfigs.LOCAL_DIRS);
     
     // Setup configuration
@@ -137,7 +140,7 @@ public class SimpleFetchedInputAllocator implements FetchedInputAllocator,
       InputAttemptIdentifier inputAttemptIdentifier) throws IOException {
     if (actualSize > maxSingleShuffleLimit
         || this.usedMemory + actualSize > this.memoryLimit) {
-      return new DiskFetchedInput(actualSize, compressedSize,
+      return new DiskFetchedInput(compressedSize,
           inputAttemptIdentifier, this, conf, localDirAllocator,
           fileNameAllocator);
     } else {
@@ -146,7 +149,7 @@ public class SimpleFetchedInputAllocator implements FetchedInputAllocator,
         LOG.info(srcNameTrimmed + ": " + "Used memory after allocating " + actualSize + " : " +
             usedMemory);
       }
-      return new MemoryFetchedInput(actualSize, compressedSize, inputAttemptIdentifier, this);
+      return new MemoryFetchedInput(actualSize, inputAttemptIdentifier, this);
     }
   }
 
@@ -157,7 +160,7 @@ public class SimpleFetchedInputAllocator implements FetchedInputAllocator,
 
     switch (type) {
     case DISK:
-      return new DiskFetchedInput(actualSize, compressedSize,
+      return new DiskFetchedInput(compressedSize,
           inputAttemptIdentifier, this, conf, localDirAllocator,
           fileNameAllocator);
     default:
@@ -194,7 +197,7 @@ public class SimpleFetchedInputAllocator implements FetchedInputAllocator,
     case DISK:
       break;
     case MEMORY:
-      unreserve(fetchedInput.getActualSize());
+      unreserve(((MemoryFetchedInput) fetchedInput).getSize());
       break;
     default:
       throw new TezUncheckedException("InputType: " + fetchedInput.getType()

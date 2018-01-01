@@ -63,7 +63,9 @@ import org.apache.hadoop.yarn.event.EventHandler;
 import org.apache.hadoop.yarn.util.SystemClock;
 import org.apache.tez.common.security.JobTokenIdentifier;
 import org.apache.tez.common.security.TokenCache;
+import org.apache.tez.dag.api.TezConfiguration;
 import org.apache.tez.dag.app.TaskCommunicatorWrapper;
+import org.apache.tez.dag.app.rm.node.AMNodeEventType;
 import org.apache.tez.serviceplugins.api.ContainerEndReason;
 import org.apache.tez.serviceplugins.api.ServicePluginException;
 import org.apache.tez.serviceplugins.api.TaskAttemptEndReason;
@@ -146,7 +148,9 @@ public class TestAMContainer {
     wc.containerCompleted();
     wc.verifyHistoryStopEvent();
     wc.verifyState(AMContainerState.COMPLETED);
-    wc.verifyNoOutgoingEvents();
+    List<Event> outgoingEvents = wc.verifyCountAndGetOutgoingEvents(1);
+    verifyUnOrderedOutgoingEventTypes(outgoingEvents,
+        AMNodeEventType.N_CONTAINER_COMPLETED);
     verifyUnregisterRunningContainer(wc.tal, wc.containerID, 0, ContainerEndReason.COMPLETED, null);
     verify(wc.chh).unregister(wc.containerID);
 
@@ -196,7 +200,9 @@ public class TestAMContainer {
     wc.containerCompleted();
     wc.verifyHistoryStopEvent();
     wc.verifyState(AMContainerState.COMPLETED);
-    wc.verifyNoOutgoingEvents();
+    List<Event> outgoingEvents = wc.verifyCountAndGetOutgoingEvents(1);
+    verifyUnOrderedOutgoingEventTypes(outgoingEvents,
+        AMNodeEventType.N_CONTAINER_COMPLETED);
     verifyUnregisterRunningContainer(wc.tal, wc.containerID, 0, ContainerEndReason.COMPLETED, null);
     verify(wc.chh).unregister(wc.containerID);
 
@@ -266,7 +272,9 @@ public class TestAMContainer {
     wc.containerCompleted();
     wc.verifyHistoryStopEvent();
     wc.verifyState(AMContainerState.COMPLETED);
-    wc.verifyNoOutgoingEvents();
+    List<Event> outgoingEvents = wc.verifyCountAndGetOutgoingEvents(1);
+    verifyUnOrderedOutgoingEventTypes(outgoingEvents,
+        AMNodeEventType.N_CONTAINER_COMPLETED);
     verifyUnregisterRunningContainer(wc.tal, wc.containerID, 0, ContainerEndReason.COMPLETED, null);
     verify(wc.chh).unregister(wc.containerID);
 
@@ -288,9 +296,11 @@ public class TestAMContainer {
     wc.stopRequest();
     wc.verifyState(AMContainerState.STOP_REQUESTED);
     // Event to NM to stop the container.
-    wc.verifyCountAndGetOutgoingEvents(1);
-    assertTrue(wc.verifyCountAndGetOutgoingEvents(1).get(0).getType() ==
-        ContainerLauncherEventType.CONTAINER_STOP_REQUEST);
+
+    List<Event> outgoingEvents = wc.verifyCountAndGetOutgoingEvents(2);
+    verifyUnOrderedOutgoingEventTypes(outgoingEvents,
+        ContainerLauncherEventType.CONTAINER_STOP_REQUEST,
+        AMNodeEventType.N_CONTAINER_COMPLETED);
 
     wc.nmStopSent();
     wc.verifyState(AMContainerState.STOPPING);
@@ -323,9 +333,10 @@ public class TestAMContainer {
     wc.stopRequest();
     wc.verifyState(AMContainerState.STOP_REQUESTED);
     // Event to NM to stop the container.
-    wc.verifyCountAndGetOutgoingEvents(1);
-    assertTrue(wc.verifyCountAndGetOutgoingEvents(1).get(0).getType() ==
-        ContainerLauncherEventType.CONTAINER_STOP_REQUEST);
+    List<Event> outgoingEvents = wc.verifyCountAndGetOutgoingEvents(2);
+    verifyUnOrderedOutgoingEventTypes(outgoingEvents,
+        ContainerLauncherEventType.CONTAINER_STOP_REQUEST,
+        AMNodeEventType.N_CONTAINER_COMPLETED);
 
     wc.nmStopFailed();
     wc.verifyState(AMContainerState.STOPPING);
@@ -366,11 +377,12 @@ public class TestAMContainer {
         "Multiple simultaneous taskAttempt");
     verify(wc.chh).unregister(wc.containerID);
     // 1 for NM stop request. 2 TERMINATING to TaskAttempt.
-    outgoingEvents = wc.verifyCountAndGetOutgoingEvents(3);
+    outgoingEvents = wc.verifyCountAndGetOutgoingEvents(4);
     verifyUnOrderedOutgoingEventTypes(outgoingEvents,
         ContainerLauncherEventType.CONTAINER_STOP_REQUEST,
         TaskAttemptEventType.TA_CONTAINER_TERMINATING,
-        TaskAttemptEventType.TA_CONTAINER_TERMINATING);
+        TaskAttemptEventType.TA_CONTAINER_TERMINATING,
+        AMNodeEventType.N_CONTAINER_COMPLETED);
     assertTrue(wc.amContainer.isInErrorState());
 
     wc.nmStopSent();
@@ -405,11 +417,12 @@ public class TestAMContainer {
         "Multiple simultaneous taskAttempt");
     verify(wc.chh).unregister(wc.containerID);
     // 1 for NM stop request. 2 TERMINATING to TaskAttempt.
-    outgoingEvents = wc.verifyCountAndGetOutgoingEvents(3);
+    outgoingEvents = wc.verifyCountAndGetOutgoingEvents(4);
     verifyUnOrderedOutgoingEventTypes(outgoingEvents,
         ContainerLauncherEventType.CONTAINER_STOP_REQUEST,
         TaskAttemptEventType.TA_CONTAINER_TERMINATING,
-        TaskAttemptEventType.TA_CONTAINER_TERMINATING);
+        TaskAttemptEventType.TA_CONTAINER_TERMINATING,
+        AMNodeEventType.N_CONTAINER_COMPLETED);
     assertTrue(wc.amContainer.isInErrorState());
 
     wc.nmStopSent();
@@ -442,10 +455,11 @@ public class TestAMContainer {
         "timed out");
     verify(wc.chh).unregister(wc.containerID);
     // 1 to TA, 1 for RM de-allocate.
-    outgoingEvents = wc.verifyCountAndGetOutgoingEvents(2);
+    outgoingEvents = wc.verifyCountAndGetOutgoingEvents(3);
     verifyUnOrderedOutgoingEventTypes(outgoingEvents,
         TaskAttemptEventType.TA_CONTAINER_TERMINATING,
-        ContainerLauncherEventType.CONTAINER_STOP_REQUEST);
+        ContainerLauncherEventType.CONTAINER_STOP_REQUEST,
+        AMNodeEventType.N_CONTAINER_COMPLETED);
     // TODO Should this be an RM DE-ALLOCATE instead ?
 
     wc.containerCompleted();
@@ -477,10 +491,11 @@ public class TestAMContainer {
         "received a STOP_REQUEST");
     verify(wc.chh).unregister(wc.containerID);
     // 1 to TA, 1 for RM de-allocate.
-    outgoingEvents = wc.verifyCountAndGetOutgoingEvents(2);
+    outgoingEvents = wc.verifyCountAndGetOutgoingEvents(3);
     verifyUnOrderedOutgoingEventTypes(outgoingEvents,
         TaskAttemptEventType.TA_CONTAINER_TERMINATING,
-        ContainerLauncherEventType.CONTAINER_STOP_REQUEST);
+        ContainerLauncherEventType.CONTAINER_STOP_REQUEST,
+        AMNodeEventType.N_CONTAINER_COMPLETED);
     // TODO Should this be an RM DE-ALLOCATE instead ?
 
     wc.containerCompleted();
@@ -511,10 +526,11 @@ public class TestAMContainer {
     verifyUnregisterRunningContainer(wc.tal, wc.containerID, 0, ContainerEndReason.LAUNCH_FAILED,
         "launchFailed");
 
-    outgoingEvents = wc.verifyCountAndGetOutgoingEvents(2);
+    outgoingEvents = wc.verifyCountAndGetOutgoingEvents(3);
     verifyUnOrderedOutgoingEventTypes(outgoingEvents,
         TaskAttemptEventType.TA_CONTAINER_TERMINATING,
-        AMSchedulerEventType.S_CONTAINER_DEALLOCATE);
+        AMSchedulerEventType.S_CONTAINER_DEALLOCATE,
+        AMNodeEventType.N_CONTAINER_COMPLETED);
     for (Event e : outgoingEvents) {
       if (e.getType() == TaskAttemptEventType.TA_CONTAINER_TERMINATING) {
         Assert.assertEquals(TaskAttemptTerminationCause.CONTAINER_LAUNCH_FAILED,
@@ -538,7 +554,9 @@ public class TestAMContainer {
 
     wc.containerCompleted();
     wc.verifyState(AMContainerState.COMPLETED);
-    wc.verifyNoOutgoingEvents();
+    List<Event> outgoingEvents = wc.verifyCountAndGetOutgoingEvents(1);
+    verifyUnOrderedOutgoingEventTypes(outgoingEvents,
+        AMNodeEventType.N_CONTAINER_COMPLETED);
 
     assertFalse(wc.amContainer.isInErrorState());
   }
@@ -561,9 +579,10 @@ public class TestAMContainer {
     verify(wc.tal).registerRunningContainer(wc.containerID, 0);
     verifyUnregisterRunningContainer(wc.tal, wc.containerID, 0, ContainerEndReason.COMPLETED, null);
 
-    outgoingEvents = wc.verifyCountAndGetOutgoingEvents(1);
+    outgoingEvents = wc.verifyCountAndGetOutgoingEvents(2);
     verifyUnOrderedOutgoingEventTypes(outgoingEvents,
-        TaskAttemptEventType.TA_CONTAINER_TERMINATED);
+        TaskAttemptEventType.TA_CONTAINER_TERMINATED,
+        AMNodeEventType.N_CONTAINER_COMPLETED);
     Assert.assertEquals(TaskAttemptTerminationCause.CONTAINER_LAUNCH_FAILED,
         ((TaskAttemptEventContainerTerminated)outgoingEvents.get(0)).getTerminationCause());
 
@@ -591,9 +610,10 @@ public class TestAMContainer {
     verify(wc.tal).registerRunningContainer(wc.containerID, 0);
     verifyUnregisterRunningContainer(wc.tal, wc.containerID, 0, ContainerEndReason.OTHER, "DiskFailed");
 
-    outgoingEvents = wc.verifyCountAndGetOutgoingEvents(1);
+    outgoingEvents = wc.verifyCountAndGetOutgoingEvents(2);
     verifyUnOrderedOutgoingEventTypes(outgoingEvents,
-        TaskAttemptEventType.TA_CONTAINER_TERMINATED_BY_SYSTEM);
+        TaskAttemptEventType.TA_CONTAINER_TERMINATED_BY_SYSTEM,
+        AMNodeEventType.N_CONTAINER_COMPLETED);
     Assert.assertEquals(TaskAttemptTerminationCause.NODE_DISK_ERROR,
         ((TaskAttemptEventContainerTerminatedBySystem)outgoingEvents.get(0)).getTerminationCause());
 
@@ -623,9 +643,10 @@ public class TestAMContainer {
     verifyUnregisterRunningContainer(wc.tal, wc.containerID, 0, ContainerEndReason.NODE_FAILED,
         "NodeFailed");
 
-    outgoingEvents = wc.verifyCountAndGetOutgoingEvents(1);
+    outgoingEvents = wc.verifyCountAndGetOutgoingEvents(2);
     verifyUnOrderedOutgoingEventTypes(outgoingEvents,
-        TaskAttemptEventType.TA_CONTAINER_TERMINATED);
+        TaskAttemptEventType.TA_CONTAINER_TERMINATED,
+        AMNodeEventType.N_CONTAINER_COMPLETED);
     Assert.assertEquals(TaskAttemptTerminationCause.NODE_FAILED,
         ((TaskAttemptEventContainerTerminated)outgoingEvents.get(0)).getTerminationCause());
 
@@ -656,11 +677,12 @@ public class TestAMContainer {
     verify(wc.chh).register(wc.containerID);
     verify(wc.chh).unregister(wc.containerID);
 
-    wc.verifyCountAndGetOutgoingEvents(0);
+    outgoingEvents = wc.verifyCountAndGetOutgoingEvents(1);
+    verifyUnOrderedOutgoingEventTypes(outgoingEvents,
+        AMNodeEventType.N_CONTAINER_COMPLETED);
 
     assertFalse(wc.amContainer.isInErrorState());
 
-    wc.verifyNoOutgoingEvents();
     wc.verifyHistoryStopEvent();
 
     assertFalse(wc.amContainer.isInErrorState());
@@ -685,9 +707,10 @@ public class TestAMContainer {
     verify(wc.chh).register(wc.containerID);
     verify(wc.chh).unregister(wc.containerID);
 
-    outgoingEvents = wc.verifyCountAndGetOutgoingEvents(1);
+    outgoingEvents = wc.verifyCountAndGetOutgoingEvents(2);
     verifyUnOrderedOutgoingEventTypes(outgoingEvents,
-        TaskAttemptEventType.TA_CONTAINER_TERMINATED);
+        TaskAttemptEventType.TA_CONTAINER_TERMINATED,
+        AMNodeEventType.N_CONTAINER_COMPLETED);
 
     assertFalse(wc.amContainer.isInErrorState());
 
@@ -722,11 +745,14 @@ public class TestAMContainer {
     verify(wc.chh).register(wc.containerID);
     verify(wc.chh).unregister(wc.containerID);
 
-    outgoingEvents = wc.verifyCountAndGetOutgoingEvents(1);
+    outgoingEvents = wc.verifyCountAndGetOutgoingEvents(2);
+
+    Event event = findEventByType(outgoingEvents, TaskAttemptEventType.TA_CONTAINER_TERMINATED_BY_SYSTEM);
     Assert.assertEquals(TaskAttemptTerminationCause.EXTERNAL_PREEMPTION,
-        ((TaskAttemptEventContainerTerminatedBySystem)outgoingEvents.get(0)).getTerminationCause());
+        ((TaskAttemptEventContainerTerminatedBySystem)event).getTerminationCause());
     verifyUnOrderedOutgoingEventTypes(outgoingEvents,
-        TaskAttemptEventType.TA_CONTAINER_TERMINATED_BY_SYSTEM);
+        TaskAttemptEventType.TA_CONTAINER_TERMINATED_BY_SYSTEM,
+        AMNodeEventType.N_CONTAINER_COMPLETED);
 
     assertFalse(wc.amContainer.isInErrorState());
 
@@ -761,9 +787,10 @@ public class TestAMContainer {
     verify(wc.chh).register(wc.containerID);
     verify(wc.chh).unregister(wc.containerID);
 
-    outgoingEvents = wc.verifyCountAndGetOutgoingEvents(1);
+    outgoingEvents = wc.verifyCountAndGetOutgoingEvents(2);
     verifyUnOrderedOutgoingEventTypes(outgoingEvents,
-        TaskAttemptEventType.TA_CONTAINER_TERMINATED_BY_SYSTEM);
+        TaskAttemptEventType.TA_CONTAINER_TERMINATED_BY_SYSTEM,
+        AMNodeEventType.N_CONTAINER_COMPLETED);
     Assert.assertEquals(TaskAttemptTerminationCause.INTERNAL_PREEMPTION,
         ((TaskAttemptEventContainerTerminatedBySystem)outgoingEvents.get(0)).getTerminationCause());
 
@@ -799,11 +826,13 @@ public class TestAMContainer {
     verify(wc.chh).register(wc.containerID);
     verify(wc.chh).unregister(wc.containerID);
 
-    outgoingEvents = wc.verifyCountAndGetOutgoingEvents(1);
+    outgoingEvents = wc.verifyCountAndGetOutgoingEvents(2);
+    Event event = findEventByType(outgoingEvents, TaskAttemptEventType.TA_CONTAINER_TERMINATED_BY_SYSTEM);
     Assert.assertEquals(TaskAttemptTerminationCause.NODE_DISK_ERROR,
-        ((TaskAttemptEventContainerTerminatedBySystem)outgoingEvents.get(0)).getTerminationCause());
+        ((TaskAttemptEventContainerTerminatedBySystem)event).getTerminationCause());
     verifyUnOrderedOutgoingEventTypes(outgoingEvents,
-        TaskAttemptEventType.TA_CONTAINER_TERMINATED_BY_SYSTEM);
+        TaskAttemptEventType.TA_CONTAINER_TERMINATED_BY_SYSTEM,
+        AMNodeEventType.N_CONTAINER_COMPLETED);
 
     assertFalse(wc.amContainer.isInErrorState());
 
@@ -862,11 +891,12 @@ public class TestAMContainer {
     wc.nodeFailed();
     // Expecting a complete event from the RM
     wc.verifyState(AMContainerState.STOPPING);
-    outgoingEvents = wc.verifyCountAndGetOutgoingEvents(3);
+    outgoingEvents = wc.verifyCountAndGetOutgoingEvents(4);
     verifyUnOrderedOutgoingEventTypes(outgoingEvents,
         TaskAttemptEventType.TA_NODE_FAILED,
         TaskAttemptEventType.TA_CONTAINER_TERMINATING,
-        AMSchedulerEventType.S_CONTAINER_DEALLOCATE);
+        AMSchedulerEventType.S_CONTAINER_DEALLOCATE,
+        AMNodeEventType.N_CONTAINER_COMPLETED);
 
     for (Event event : outgoingEvents) {
       if (event.getType() == TaskAttemptEventType.TA_NODE_FAILED) {
@@ -904,11 +934,12 @@ public class TestAMContainer {
     wc.nodeFailed();
     // Expecting a complete event from the RM
     wc.verifyState(AMContainerState.STOPPING);
-    outgoingEvents = wc.verifyCountAndGetOutgoingEvents(3);
+    outgoingEvents = wc.verifyCountAndGetOutgoingEvents(4);
     verifyUnOrderedOutgoingEventTypes(outgoingEvents,
         TaskAttemptEventType.TA_NODE_FAILED,
         TaskAttemptEventType.TA_NODE_FAILED,
-        AMSchedulerEventType.S_CONTAINER_DEALLOCATE);
+        AMSchedulerEventType.S_CONTAINER_DEALLOCATE,
+        AMNodeEventType.N_CONTAINER_COMPLETED);
 
     for (Event event : outgoingEvents) {
       if (event.getType() == TaskAttemptEventType.TA_NODE_FAILED) {
@@ -945,12 +976,13 @@ public class TestAMContainer {
     wc.nodeFailed();
     // Expecting a complete event from the RM
     wc.verifyState(AMContainerState.STOPPING);
-    outgoingEvents = wc.verifyCountAndGetOutgoingEvents(4);
+    outgoingEvents = wc.verifyCountAndGetOutgoingEvents(5);
     verifyUnOrderedOutgoingEventTypes(outgoingEvents,
         TaskAttemptEventType.TA_NODE_FAILED,
         TaskAttemptEventType.TA_NODE_FAILED,
         TaskAttemptEventType.TA_CONTAINER_TERMINATING,
-        AMSchedulerEventType.S_CONTAINER_DEALLOCATE);
+        AMSchedulerEventType.S_CONTAINER_DEALLOCATE,
+        AMNodeEventType.N_CONTAINER_COMPLETED);
 
     for (Event event : outgoingEvents) {
       if (event.getType() == TaskAttemptEventType.TA_NODE_FAILED) {
@@ -1183,7 +1215,7 @@ public class TestAMContainer {
 
   // TODO Verify diagnostics in most of the tests.
 
-  private static class WrappedContainer {
+  static class WrappedContainer {
 
     long rmIdentifier = 2000;
     static final int taskPriority = 10;
@@ -1215,10 +1247,10 @@ public class TestAMContainer {
     public AMContainerImpl amContainer;
 
     @SuppressWarnings("deprecation") // ContainerId
-    public WrappedContainer(boolean shouldProfile, String profileString) {
+    public WrappedContainer(boolean shouldProfile, String profileString, int cIdInt) {
       applicationID = ApplicationId.newInstance(rmIdentifier, 1);
       appAttemptID = ApplicationAttemptId.newInstance(applicationID, 1);
-      containerID = ContainerId.newInstance(appAttemptID, 1);
+      containerID = ContainerId.newInstance(appAttemptID, cIdInt);
       nodeID = NodeId.newInstance("host", 12500);
       nodeHttpAddress = "host:12501";
       resource = Resource.newInstance(1024, 1);
@@ -1261,11 +1293,12 @@ public class TestAMContainer {
       doReturn(taskAttemptID).when(taskSpec).getTaskAttemptID();
 
       amContainer = new AMContainerImpl(container, chh, tal,
-          new ContainerContextMatcher(), appContext, 0, 0, 0);
+          new ContainerContextMatcher(), appContext, 0, 0, 0, conf.get(TezConfiguration.TEZ_AM_SHUFFLE_AUXILIARY_SERVICE_ID,
+          TezConfiguration.TEZ_AM_SHUFFLE_AUXILIARY_SERVICE_ID_DEFAULT));
     }
 
     public WrappedContainer() {
-      this(false, null);
+      this(false, null, 1);
     }
 
     protected void mockDAGID() {
@@ -1438,6 +1471,15 @@ public class TestAMContainer {
         + " in outgoing event list", expectedTypeList.isEmpty());
     assertTrue("Found unexpected events: " + eventsCopy
         + " in outgoing event list", eventsCopy.isEmpty());
+  }
+
+  private Event findEventByType(List<Event> events, Enum<?> type) {
+    for (Event event : events) {
+      if (event.getType() == type) {
+        return event;
+      }
+    }
+    return null;
   }
   
   private LocalResource createLocalResource(String name) {

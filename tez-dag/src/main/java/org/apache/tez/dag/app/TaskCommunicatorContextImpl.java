@@ -28,6 +28,7 @@ import org.apache.hadoop.security.Credentials;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.tez.dag.api.UserPayload;
+import org.apache.tez.dag.app.dag.Task;
 import org.apache.tez.dag.app.rm.container.AMContainer;
 import org.apache.tez.runtime.api.TaskFailureType;
 import org.apache.tez.serviceplugins.api.DagInfo;
@@ -122,8 +123,19 @@ public class TaskCommunicatorContextImpl implements TaskCommunicatorContext, Ver
   }
 
   @Override
+  public void taskSubmitted(TezTaskAttemptID taskAttemptId, ContainerId containerId) {
+    taskCommunicatorManager.taskSubmitted(taskAttemptId, containerId);
+  }
+
+  @Override
+  public void taskStartedRemotely(TezTaskAttemptID taskAttemptId) {
+    taskCommunicatorManager.taskStartedRemotely(taskAttemptId);
+  }
+
+  @Override
   public void taskStartedRemotely(TezTaskAttemptID taskAttemptId, ContainerId containerId) {
-    taskCommunicatorManager.taskStartedRemotely(taskAttemptId, containerId);
+    taskSubmitted(taskAttemptId, containerId);
+    taskStartedRemotely(taskAttemptId);
   }
 
   @Override
@@ -144,7 +156,8 @@ public class TaskCommunicatorContextImpl implements TaskCommunicatorContext, Ver
   public void registerForVertexStateUpdates(String vertexName,
                                             @Nullable Set<VertexState> stateSet) {
     Preconditions.checkNotNull(vertexName, "VertexName cannot be null: " + vertexName);
-    getDag().getStateChangeNotifier().registerForVertexUpdates(vertexName, stateSet,
+    DAG dag = getDag();
+    dag.getStateChangeNotifier().registerForVertexUpdates(vertexName, stateSet,
         this);
   }
 
@@ -162,7 +175,8 @@ public class TaskCommunicatorContextImpl implements TaskCommunicatorContext, Ver
   @Override
   public Iterable<String> getInputVertexNames(String vertexName) {
     Preconditions.checkNotNull(vertexName, "VertexName cannot be null: " + vertexName);
-    Vertex vertex = getDag().getVertex(vertexName);
+    DAG dag = getDag();
+    Vertex vertex = dag.getVertex(vertexName);
     Set<Vertex> sources = vertex.getInputVertices().keySet();
     return Iterables.transform(sources, new Function<Vertex, String>() {
       @Override
@@ -175,27 +189,35 @@ public class TaskCommunicatorContextImpl implements TaskCommunicatorContext, Ver
   @Override
   public int getVertexTotalTaskCount(String vertexName) {
     Preconditions.checkArgument(vertexName != null, "VertexName must be specified");
-    return getDag().getVertex(vertexName).getTotalTasks();
+    DAG dag = getDag();
+    Vertex vertex = dag.getVertex(vertexName);
+    return vertex.getTotalTasks();
   }
 
   @Override
   public int getVertexCompletedTaskCount(String vertexName) {
     Preconditions.checkArgument(vertexName != null, "VertexName must be specified");
-    return getDag().getVertex(vertexName).getCompletedTasks();
+    DAG dag = getDag();
+    Vertex vertex = dag.getVertex(vertexName);
+    return vertex.getCompletedTasks();
   }
 
   @Override
   public int getVertexRunningTaskCount(String vertexName) {
     Preconditions.checkArgument(vertexName != null, "VertexName must be specified");
-    return getDag().getVertex(vertexName).getRunningTasks();
+    DAG dag = getDag();
+    Vertex vertex = dag.getVertex(vertexName);
+    return vertex.getRunningTasks();
   }
 
   @Override
   public long getFirstAttemptStartTime(String vertexName, int taskIndex) {
     Preconditions.checkArgument(vertexName != null, "VertexName must be specified");
     Preconditions.checkArgument(taskIndex >=0, "TaskIndex must be > 0");
-    return getDag().getVertex(vertexName).getTask(
-        taskIndex).getFirstAttemptStartTime();
+    DAG dag = getDag();
+    Vertex vertex = dag.getVertex(vertexName);
+    Task task = vertex.getTask(taskIndex);
+    return task.getFirstAttemptStartTime();
   }
 
   @Override

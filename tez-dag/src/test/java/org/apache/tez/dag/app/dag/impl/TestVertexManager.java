@@ -18,18 +18,25 @@
 
 package org.apache.tez.dag.app.dag.impl;
 
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 import static org.mockito.Matchers.any;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedList;
@@ -38,6 +45,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Callable;
 
+import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.yarn.event.EventHandler;
 import org.apache.tez.dag.api.InputDescriptor;
@@ -51,10 +59,13 @@ import org.apache.tez.dag.app.dag.StateChangeNotifier;
 import org.apache.tez.dag.app.dag.Vertex;
 import org.apache.tez.dag.app.dag.event.CallableEvent;
 import org.apache.tez.dag.app.dag.event.VertexEventInputDataInformation;
+import org.apache.tez.dag.app.dag.event.VertexEventRouteEvent;
 import org.apache.tez.runtime.api.Event;
 import org.apache.tez.runtime.api.TaskAttemptIdentifier;
+import org.apache.tez.runtime.api.events.CustomProcessorEvent;
 import org.apache.tez.runtime.api.events.InputDataInformationEvent;
 import org.apache.tez.runtime.api.events.VertexManagerEvent;
+import org.apache.tez.runtime.api.impl.GroupInputSpec;
 import org.apache.tez.runtime.api.impl.TezEvent;
 import org.junit.Before;
 import org.junit.Test;
@@ -132,11 +143,11 @@ public class TestVertexManager {
   
   @Test(timeout = 5000)
   public void testOnRootVertexInitialized() throws Exception {
+    Configuration conf = new Configuration();
     VertexManager vm =
-        new VertexManager(
-            VertexManagerPluginDescriptor.create(RootInputVertexManager.class
-                .getName()), UserGroupInformation.getCurrentUser(), 
-                mockVertex, mockAppContext, mock(StateChangeNotifier.class));
+        new VertexManager(RootInputVertexManager.createConfigBuilder(conf)
+            .build(), UserGroupInformation.getCurrentUser(),
+            mockVertex, mockAppContext, mock(StateChangeNotifier.class));
     vm.initialize();
     InputDescriptor id1 = mock(InputDescriptor.class);
     List<Event> events1 = new LinkedList<Event>();
@@ -203,6 +214,79 @@ public class TestVertexManager {
       edgeVertexSet.add(tezEvent.getDestinationInfo().getEdgeVertexName());
     }
     assertEquals(Sets.newHashSet("input1","input2"), edgeVertexSet);
+  }
+
+  @Test(timeout = 5000)
+  public void testVMPluginCtxGetInputVertexGroup() throws Exception {
+    VertexManager vm =
+      new VertexManager(VertexManagerPluginDescriptor.create(CustomVertexManager.class.getName()),
+        UserGroupInformation.getCurrentUser(), mockVertex, mockAppContext,
+        mock(StateChangeNotifier.class));
+
+    assertTrue(vm.pluginContext.getInputVertexGroups().isEmpty());
+
+    String group = "group", v1 = "v1", v2 = "v2";
+    when(mockVertex.getGroupInputSpecList())
+      .thenReturn(Arrays.asList(new GroupInputSpec(group, Arrays.asList(v1, v2), null)));
+    Map<String, List<String>> groups = vm.pluginContext.getInputVertexGroups();
+    assertEquals(1, groups.size());
+    assertTrue(groups.containsKey(group));
+    assertEquals(2, groups.get(group).size());
+    assertTrue(groups.get(group).contains(v1));
+    assertTrue(groups.get(group).contains(v2));
+  }
+
+  @Test(timeout = 5000)
+  public void testSendCustomProcessorEvent() throws Exception {
+    VertexManager vm =
+      new VertexManager(VertexManagerPluginDescriptor.create(CustomVertexManager.class.getName()),
+        UserGroupInformation.getCurrentUser(), mockVertex, mockAppContext,
+        mock(StateChangeNotifier.class));
+    ArgumentCaptor<VertexEventRouteEvent> requestCaptor =
+      ArgumentCaptor.forClass(VertexEventRouteEvent.class);
+
+    when(mockVertex.getTotalTasks()).thenReturn(2);
+
+    List<CustomProcessorEvent> events = new ArrayList<>();
+    // task id too small, should fail
+    try {
+      vm.pluginContext.sendEventToProcessor(events, -1);
+      fail("Should fail for invalid task id");
+    } catch (IllegalArgumentException exception) {
+      assertTrue(exception.getMessage().contains("Invalid taskId"));
+    }
+    // task id too large, should fail
+    try {
+      vm.pluginContext.sendEventToProcessor(events, 10);
+      fail("Should fail for invalid task id");
+    } catch (IllegalArgumentException exception) {
+      assertTrue(exception.getMessage().contains("Invalid taskId"));
+    }
+
+    // null event, do nothing
+    vm.pluginContext.sendEventToProcessor(null, 0);
+    verify(mockHandler, never()).handle(requestCaptor.capture());
+
+    // empty event
+    vm.pluginContext.sendEventToProcessor(events, 1);
+    verify(mockHandler, never()).handle(requestCaptor.capture());
+
+    //events.add();
+    byte[] payload = new byte[] {1,2,3};
+    events.add(CustomProcessorEvent.create(ByteBuffer.wrap(payload)));
+    vm.pluginContext.sendEventToProcessor(events, 1);
+    verify(mockHandler, times(1)).handle(requestCaptor.capture());
+    CustomProcessorEvent cpe =
+      (CustomProcessorEvent)(requestCaptor.getValue().getEvents().get(0).getEvent());
+
+    // should be able to get payload any times
+    for (int i = 0; i < 2; i++) {
+      ByteBuffer payloadBuffer = cpe.getPayload();
+      assertEquals(payload.length, payloadBuffer.remaining());
+      for (byte aPayload : payload) {
+        assertEquals(aPayload, payloadBuffer.get());
+      }
+    }
   }
 
   public static class CustomVertexManager extends VertexManagerPlugin {

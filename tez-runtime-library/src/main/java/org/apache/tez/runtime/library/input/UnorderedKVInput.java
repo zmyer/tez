@@ -1,5 +1,5 @@
 /**
-git diff * Licensed to the Apache Software Foundation (ASF) under one
+* Licensed to the Apache Software Foundation (ASF) under one
 * or more contributor license agreements.  See the NOTICE file
 * distributed with this work for additional information
 * regarding copyright ownership.  The ASF licenses this file
@@ -27,6 +27,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import org.apache.tez.common.TezUtilsInternal;
 import org.apache.tez.runtime.api.ProgressFailedException;
 import org.apache.tez.runtime.library.common.Constants;
+import org.apache.tez.runtime.library.common.shuffle.ShuffleUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
@@ -122,6 +123,7 @@ public class UnorderedKVInput extends AbstractLogicalInput {
         codec = null;
       }
 
+      boolean compositeFetch = ShuffleUtils.isTezShuffleHandler(conf);
       boolean ifileReadAhead = conf.getBoolean(TezRuntimeConfiguration.TEZ_RUNTIME_IFILE_READAHEAD,
           TezRuntimeConfiguration.TEZ_RUNTIME_IFILE_READAHEAD_DEFAULT);
       int ifileReadAheadLength = 0;
@@ -135,7 +137,9 @@ public class UnorderedKVInput extends AbstractLogicalInput {
           TezRuntimeConfiguration.TEZ_RUNTIME_IFILE_BUFFER_SIZE_DEFAULT);
 
       this.inputManager = new SimpleFetchedInputAllocator(
-          TezUtilsInternal.cleanVertexName(getContext().getSourceVertexName()), getContext().getUniqueIdentifier(), conf,
+          TezUtilsInternal.cleanVertexName(getContext().getSourceVertexName()),
+          getContext().getUniqueIdentifier(),
+          getContext().getDagIdentifier(), conf,
           getContext().getTotalMemoryAvailableToTask(),
           memoryUpdateCallbackHandler.getMemoryAssigned());
 
@@ -143,7 +147,7 @@ public class UnorderedKVInput extends AbstractLogicalInput {
           ifileReadAhead, ifileReadAheadLength, codec, inputManager);
 
       this.inputEventHandler = new ShuffleInputEventHandlerImpl(getContext(), shuffleManager,
-          inputManager, codec, ifileReadAhead, ifileReadAheadLength);
+          inputManager, codec, ifileReadAhead, ifileReadAheadLength, compositeFetch);
 
       ////// End of Initial configuration
 
@@ -268,6 +272,7 @@ public class UnorderedKVInput extends AbstractLogicalInput {
     confKeys.add(TezRuntimeConfiguration.TEZ_RUNTIME_SHUFFLE_FETCH_BUFFER_PERCENT);
     confKeys.add(TezRuntimeConfiguration.TEZ_RUNTIME_SHUFFLE_MEMORY_LIMIT_PERCENT);
     confKeys.add(TezRuntimeConfiguration.TEZ_RUNTIME_SHUFFLE_MERGE_PERCENT);
+    confKeys.add(TezRuntimeConfiguration.TEZ_RUNTIME_SHUFFLE_FETCHER_USE_SHARED_POOL);
     confKeys.add(TezRuntimeConfiguration.TEZ_RUNTIME_INPUT_POST_MERGE_BUFFER_PERCENT);
     confKeys.add(TezRuntimeConfiguration.TEZ_RUNTIME_KEY_CLASS);
     confKeys.add(TezRuntimeConfiguration.TEZ_RUNTIME_VALUE_CLASS);
@@ -282,6 +287,7 @@ public class UnorderedKVInput extends AbstractLogicalInput {
     confKeys.add(TezConfiguration.TEZ_COUNTERS_MAX_GROUPS);
     confKeys.add(TezRuntimeConfiguration.TEZ_RUNTIME_CLEANUP_FILES_ON_INTERRUPT);
     confKeys.add(Constants.TEZ_RUNTIME_TASK_MEMORY);
+    confKeys.add(TezConfiguration.TEZ_AM_SHUFFLE_AUXILIARY_SERVICE_ID);
   }
 
   // TODO Maybe add helper methods to extract keys

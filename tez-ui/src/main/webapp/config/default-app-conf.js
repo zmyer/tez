@@ -46,7 +46,8 @@ module.exports = { // Tez App configurations
       task: 'TEZ_TASK_ID',
       attempt: 'TEZ_TASK_ATTEMPT_ID',
 
-      "hive-query": 'HIVE_QUERY_ID',
+      'dag-info': 'TEZ_DAG_EXTRA_INFO',
+      'hive-query': 'HIVE_QUERY_ID',
 
       app: 'TEZ_APPLICATION'
     },
@@ -107,6 +108,24 @@ module.exports = { // Tez App configurations
         },
         {
           counterName: 'HDFS_WRITE_OPS',
+          counterGroupName: 'org.apache.tez.common.counters.FileSystemCounter',
+        },
+
+        //WASB/ADLS counters
+        {
+          counterName: 'WASB_BYTES_READ',
+          counterGroupName: 'org.apache.tez.common.counters.FileSystemCounter',
+        },
+        {
+          counterName: 'WASB_BYTES_WRITTEN',
+          counterGroupName: 'org.apache.tez.common.counters.FileSystemCounter',
+        },
+        {
+          counterName: 'ADL_BYTES_READ',
+          counterGroupName: 'org.apache.tez.common.counters.FileSystemCounter',
+        },
+        {
+          counterName: 'ADL_BYTES_WRITTEN',
           counterGroupName: 'org.apache.tez.common.counters.FileSystemCounter',
         },
 

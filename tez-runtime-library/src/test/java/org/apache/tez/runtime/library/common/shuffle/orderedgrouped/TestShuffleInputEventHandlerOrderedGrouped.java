@@ -6,6 +6,8 @@ import org.apache.hadoop.io.Text;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.tez.common.TezCommonUtils;
+import org.apache.tez.common.TezExecutors;
+import org.apache.tez.common.TezSharedExecutor;
 import org.apache.tez.common.TezUtilsInternal;
 import org.apache.tez.common.counters.TezCounters;
 import org.apache.tez.common.security.JobTokenIdentifier;
@@ -16,10 +18,15 @@ import org.apache.tez.runtime.api.InputContext;
 import org.apache.tez.runtime.api.events.DataMovementEvent;
 import org.apache.tez.runtime.api.events.InputFailedEvent;
 import org.apache.tez.runtime.api.impl.ExecutionContextImpl;
+import org.apache.tez.runtime.library.common.CompositeInputAttemptIdentifier;
 import org.apache.tez.runtime.library.common.InputAttemptIdentifier;
+import org.apache.tez.runtime.library.common.shuffle.ShuffleUtils;
 import org.apache.tez.runtime.library.shuffle.impl.ShuffleUserPayloads;
+import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
+import org.mockito.invocation.InvocationOnMock;
+import org.mockito.stubbing.Answer;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -27,9 +34,11 @@ import java.util.BitSet;
 import java.util.Collections;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
 
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Matchers.any;
+import static org.mockito.Matchers.anyInt;
 import static org.mockito.Matchers.anyString;
 import static org.mockito.Matchers.eq;
 import static org.mockito.Mockito.doReturn;
@@ -65,6 +74,8 @@ public class TestShuffleInputEventHandlerOrderedGrouped {
   private ShuffleScheduler realScheduler;
   private MergeManager mergeManager;
 
+  private TezExecutors sharedExecutor;
+
   private InputContext createTezInputContext() throws IOException {
     ApplicationId applicationId = ApplicationId.newInstance(1, 1);
     InputContext inputContext = mock(InputContext.class);
@@ -79,6 +90,15 @@ public class TestShuffleInputEventHandlerOrderedGrouped {
         new JobTokenSecretManager());
     ByteBuffer tokenBuffer = TezCommonUtils.serializeServiceData(sessionToken);
     doReturn(tokenBuffer).when(inputContext).getServiceConsumerMetaData(anyString());
+    when(inputContext.createTezFrameworkExecutorService(anyInt(), anyString())).thenAnswer(
+        new Answer<ExecutorService>() {
+          @Override
+          public ExecutorService answer(InvocationOnMock invocation) throws Throwable {
+            return sharedExecutor.createExecutorService(
+                invocation.getArgumentAt(0, Integer.class),
+                invocation.getArgumentAt(1, String.class));
+          }
+        });
     return inputContext;
   }
 
@@ -134,7 +154,13 @@ public class TestShuffleInputEventHandlerOrderedGrouped {
 
   @Before
   public void setup() throws Exception {
-   setupScheduler(2);
+    sharedExecutor = new TezSharedExecutor(new Configuration());
+    setupScheduler(2);
+  }
+
+  @After
+  public void cleanup() {
+    sharedExecutor.shutdownNow();
   }
 
   private void setupScheduler(int numInputs) throws Exception {
@@ -153,7 +179,7 @@ public class TestShuffleInputEventHandlerOrderedGrouped {
         0,
         "src vertex");
     scheduler = spy(realScheduler);
-    handler = new ShuffleInputEventHandlerOrderedGrouped(inputContext, scheduler);
+    handler = new ShuffleInputEventHandlerOrderedGrouped(inputContext, scheduler, ShuffleUtils.isTezShuffleHandler(config));
     mergeManager = mock(MergeManager.class);
   }
 
@@ -163,9 +189,9 @@ public class TestShuffleInputEventHandlerOrderedGrouped {
     int attemptNum = 0;
     int inputIdx = 0;
     Event dme1 = createDataMovementEvent(attemptNum, inputIdx, null, false, true, true, 0);
-    InputAttemptIdentifier id1 =
-        new InputAttemptIdentifier(inputIdx, attemptNum,
-            PATH_COMPONENT, false, InputAttemptIdentifier.SPILL_INFO.INCREMENTAL_UPDATE, 0);
+    CompositeInputAttemptIdentifier id1 =
+        new CompositeInputAttemptIdentifier(inputIdx, attemptNum,
+            PATH_COMPONENT, false, InputAttemptIdentifier.SPILL_INFO.INCREMENTAL_UPDATE, 0, 1);
     handler.handleEvents(Collections.singletonList(dme1));
     int partitionId = attemptNum;
     verify(scheduler).addKnownMapOutput(eq(HOST), eq(PORT), eq(partitionId), eq(id1));
@@ -173,9 +199,9 @@ public class TestShuffleInputEventHandlerOrderedGrouped {
 
     //Send final_update event.
     Event dme2 = createDataMovementEvent(attemptNum, inputIdx, null, false, true, false, 1);
-    InputAttemptIdentifier id2 =
-        new InputAttemptIdentifier(inputIdx, attemptNum,
-            PATH_COMPONENT, false, InputAttemptIdentifier.SPILL_INFO.FINAL_UPDATE, 1);
+    CompositeInputAttemptIdentifier id2 =
+        new CompositeInputAttemptIdentifier(inputIdx, attemptNum,
+            PATH_COMPONENT, false, InputAttemptIdentifier.SPILL_INFO.FINAL_UPDATE, 1, 1);
     handler.handleEvents(Collections.singletonList(dme2));
     partitionId = attemptNum;
     assertTrue(scheduler.pipelinedShuffleInfoEventsMap.containsKey(id2.getInputIdentifier()));
@@ -224,13 +250,20 @@ public class TestShuffleInputEventHandlerOrderedGrouped {
     Event dme1 = createDataMovementEvent(attemptNum, inputIdx, null, false, true, true, 0, attemptNum);
     handler.handleEvents(Collections.singletonList(dme1));
 
-    InputAttemptIdentifier id1 =
-        new InputAttemptIdentifier(inputIdx, attemptNum,
-            PATH_COMPONENT, false, InputAttemptIdentifier.SPILL_INFO.INCREMENTAL_UPDATE, 0);
+    CompositeInputAttemptIdentifier id1 =
+        new CompositeInputAttemptIdentifier(inputIdx, attemptNum,
+            PATH_COMPONENT, false, InputAttemptIdentifier.SPILL_INFO.INCREMENTAL_UPDATE, 0, 1);
 
     verify(scheduler, times(1)).addKnownMapOutput(eq(HOST), eq(PORT), eq(1), eq(id1));
     assertTrue("Shuffle info events should not be empty for pipelined shuffle",
         !scheduler.pipelinedShuffleInfoEventsMap.isEmpty());
+
+    int valuesInMapLocations = scheduler.mapLocations.values().size();
+    assertTrue("Maplocations should have values. current size: " + valuesInMapLocations,
+        valuesInMapLocations > 0);
+
+    // start scheduling for download
+    scheduler.getMapsForHost(scheduler.mapLocations.values().iterator().next());
 
     //Attempt #0 comes up. When processing this, it should report exception
     attemptNum = 0;
@@ -238,10 +271,43 @@ public class TestShuffleInputEventHandlerOrderedGrouped {
     Event dme2 = createDataMovementEvent(attemptNum, inputIdx, null, false, true, true, 0, attemptNum);
     handler.handleEvents(Collections.singletonList(dme2));
 
-    InputAttemptIdentifier id2 =
-        new InputAttemptIdentifier(inputIdx, attemptNum,
-            PATH_COMPONENT, false, InputAttemptIdentifier.SPILL_INFO.INCREMENTAL_UPDATE, 0);
-    verify(scheduler, times(1)).reportExceptionForInput(any(IOException.class));
+    // task should issue kill request
+    verify(scheduler, times(1)).killSelf(any(IOException.class), any(String.class));
+  }
+
+  @Test (timeout = 5000)
+  public void testPipelinedShuffle_WithObsoleteEvents() throws IOException, InterruptedException {
+    //Process attempt #1 first
+    int attemptNum = 1;
+    int inputIdx = 1;
+
+    Event dme1 = createDataMovementEvent(attemptNum, inputIdx, null, false, true, true, 0, attemptNum);
+    handler.handleEvents(Collections.singletonList(dme1));
+
+    CompositeInputAttemptIdentifier id1 =
+        new CompositeInputAttemptIdentifier(inputIdx, attemptNum,
+            PATH_COMPONENT, false, InputAttemptIdentifier.SPILL_INFO.INCREMENTAL_UPDATE, 0, 1);
+
+    verify(scheduler, times(1)).addKnownMapOutput(eq(HOST), eq(PORT), eq(1), eq(id1));
+    assertTrue("Shuffle info events should not be empty for pipelined shuffle",
+        !scheduler.pipelinedShuffleInfoEventsMap.isEmpty());
+
+    int valuesInMapLocations = scheduler.mapLocations.values().size();
+    assertTrue("Maplocations should have values. current size: " + valuesInMapLocations,
+        valuesInMapLocations > 0);
+
+    // start scheduling for download. Sets up scheduledForDownload in eventInfo.
+    scheduler.getMapsForHost(scheduler.mapLocations.values().iterator().next());
+
+    // send input failed event.
+    List<Event> events = new LinkedList<Event>();
+    int targetIdx = 1;
+    InputFailedEvent failedEvent = InputFailedEvent.create(targetIdx, 0);
+    events.add(failedEvent);
+    handler.handleEvents(events);
+
+    // task should issue kill request, as inputs are scheduled for download already.
+    verify(scheduler, times(1)).killSelf(any(IOException.class), any(String.class));
   }
 
   @Test(timeout = 5000)
@@ -252,8 +318,8 @@ public class TestShuffleInputEventHandlerOrderedGrouped {
     Event dme = createDataMovementEvent(srcIdx, targetIdx, null, false);
     events.add(dme);
     handler.handleEvents(events);
-    InputAttemptIdentifier expectedIdentifier = new InputAttemptIdentifier(targetIdx, 0,
-        PATH_COMPONENT);
+    CompositeInputAttemptIdentifier expectedIdentifier = new CompositeInputAttemptIdentifier(targetIdx, 0,
+        PATH_COMPONENT, 1);
     int partitionId = srcIdx;
     verify(scheduler).addKnownMapOutput(eq(HOST), eq(PORT), eq(partitionId),
         eq(expectedIdentifier));
@@ -310,8 +376,8 @@ public class TestShuffleInputEventHandlerOrderedGrouped {
     events.add(dme);
     handler.handleEvents(events);
     int partitionId = srcIdx;
-    InputAttemptIdentifier expectedIdentifier =
-        new InputAttemptIdentifier(taskIndex, 0, PATH_COMPONENT);
+    CompositeInputAttemptIdentifier expectedIdentifier =
+        new CompositeInputAttemptIdentifier(taskIndex, 0, PATH_COMPONENT, 1);
     verify(scheduler).addKnownMapOutput(eq(HOST), eq(PORT), eq(partitionId), eq(expectedIdentifier));
   }
 

@@ -12,20 +12,6 @@
  * limitations under the License.
  */
 
-/*
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 package org.apache.tez.serviceplugins.api;
 
 import javax.annotation.Nullable;
@@ -123,11 +109,31 @@ public interface TaskCommunicatorContext extends ServicePluginContextBase {
   void containerAlive(ContainerId containerId);
 
   /**
-   * Inform the framework that the task has started execution
+   * Inform the framework that the task has been submitted for execution. The expectation is that
+   * the implementing TaskCommunicator will inform the framework about task submission, followed
+   * by the task starting.
    *
    * @param taskAttemptId the relevant task attempt id
    * @param containerId   the containerId in which the task attempt is running
    */
+  void taskSubmitted(TezTaskAttemptID taskAttemptId, ContainerId containerId);
+
+  /**
+   * Inform the framework that the task has started execution
+   *
+   * @param taskAttemptId the relevant task attempt id
+   */
+  void taskStartedRemotely(TezTaskAttemptID taskAttemptId);
+
+  /**
+   * Inform the framework that the task has started execution
+   *
+   * Use {@link #taskSubmitted(TezTaskAttemptID, ContainerId)}
+   * and {@link #taskStartedRemotely(TezTaskAttemptID)} instead
+   *
+   * @param taskAttemptId the relevant task attempt id
+   */
+  @Deprecated
   void taskStartedRemotely(TezTaskAttemptID taskAttemptId, ContainerId containerId);
 
   /**

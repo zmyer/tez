@@ -16,6 +16,7 @@ package org.apache.tez.runtime.library.common.shuffle.orderedgrouped;
 
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.Matchers.anyInt;
 import static org.mockito.Matchers.anyString;
 import static org.mockito.Matchers.eq;
 import static org.mockito.Mockito.doReturn;
@@ -26,11 +27,15 @@ import static org.mockito.Mockito.when;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.concurrent.ExecutorService;
 
+import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.tez.common.TezCommonUtils;
+import org.apache.tez.common.TezExecutors;
+import org.apache.tez.common.TezSharedExecutor;
 import org.apache.tez.common.counters.TezCounters;
 import org.apache.tez.common.security.JobTokenIdentifier;
 import org.apache.tez.common.security.JobTokenSecretManager;
@@ -40,14 +45,26 @@ import org.apache.tez.runtime.api.TaskFailureType;
 import org.apache.tez.runtime.api.InputContext;
 import org.apache.tez.runtime.api.impl.ExecutionContextImpl;
 import org.apache.tez.runtime.library.common.Constants;
+import org.junit.After;
+import org.junit.Before;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import org.mockito.invocation.InvocationOnMock;
+import org.mockito.stubbing.Answer;
 
 public class TestShuffle {
 
-  private static final Logger LOG = LoggerFactory.getLogger(TestShuffle.class);
+  private TezExecutors sharedExecutor;
+
+  @Before
+  public void setup() {
+    sharedExecutor = new TezSharedExecutor(new Configuration());
+  }
+
+  @After
+  public void cleanup() {
+    sharedExecutor.shutdownNow();
+  }
 
   @Test(timeout = 10000)
   public void testSchedulerTerminatesOnException() throws IOException, InterruptedException {
@@ -91,6 +108,36 @@ public class TestShuffle {
 
   }
 
+  @Test(timeout = 10000)
+  public void testKillSelf() throws IOException, InterruptedException {
+    InputContext inputContext = createTezInputContext();
+    TezConfiguration conf = new TezConfiguration();
+    conf.setLong(Constants.TEZ_RUNTIME_TASK_MEMORY, 300000l);
+    Shuffle shuffle = new Shuffle(inputContext, conf, 1, 3000000l);
+    try {
+      shuffle.run();
+      ShuffleScheduler scheduler = shuffle.scheduler;
+      assertFalse("scheduler.isShutdown should be false", scheduler.isShutdown());
+
+      // killSelf() would invoke close(). Internally Shuffle --> merge.close() --> finalMerge()
+      // gets called. In MergeManager::finalMerge(), it would throw illegal argument exception as
+      // uniqueIdentifier is not present in inputContext. This is used as means of simulating
+      // exception.
+      scheduler.killSelf(new Exception(), "due to internal error");
+      assertTrue("scheduler.isShutdown should be true", scheduler.isShutdown());
+
+      //killSelf() should not result in reporting failure to AM
+      ArgumentCaptor<Throwable> throwableArgumentCaptor = ArgumentCaptor.forClass(Throwable.class);
+      ArgumentCaptor<String> stringArgumentCaptor = ArgumentCaptor.forClass(String.class);
+      verify(inputContext, times(0)).reportFailure(eq(TaskFailureType.NON_FATAL),
+          throwableArgumentCaptor.capture(),
+          stringArgumentCaptor.capture());
+    } finally {
+      shuffle.shutdown();
+    }
+
+  }
+
 
   private InputContext createTezInputContext() throws IOException {
     ApplicationId applicationId = ApplicationId.newInstance(1, 1);
@@ -107,6 +154,15 @@ public class TestShuffle {
         new JobTokenSecretManager());
     ByteBuffer tokenBuffer = TezCommonUtils.serializeServiceData(sessionToken);
     doReturn(tokenBuffer).when(inputContext).getServiceConsumerMetaData(anyString());
+    when(inputContext.createTezFrameworkExecutorService(anyInt(), anyString())).thenAnswer(
+        new Answer<ExecutorService>() {
+          @Override
+          public ExecutorService answer(InvocationOnMock invocation) throws Throwable {
+            return sharedExecutor.createExecutorService(
+                invocation.getArgumentAt(0, Integer.class),
+                invocation.getArgumentAt(1, String.class));
+          }
+        });
     return inputContext;
   }
 }

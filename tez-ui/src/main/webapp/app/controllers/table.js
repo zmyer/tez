@@ -51,7 +51,8 @@ export default AbstractController.extend({
       searchText: this.get("searchText"),
       sortColumnId: this.get("sortColumnId"),
       sortOrder: this.get("sortOrder"),
-      pageNo: this.get("pageNo")
+      pageNo: this.get("pageNo"),
+      headerAsSortButton: true,
     });
   }),
 
@@ -63,8 +64,8 @@ export default AbstractController.extend({
     var visibleColumnIDs = this.get("localStorage").get(this.get("storageID")) || {};
 
     this.get('columns').forEach(function (config) {
-      if(visibleColumnIDs[config.id] !== false) {
-        visibleColumnIDs[config.id] = true;
+      if(visibleColumnIDs[config.id] === undefined) {
+        visibleColumnIDs[config.id] = !Ember.get(config, "hiddenByDefault");
       }
     });
 
@@ -82,7 +83,7 @@ export default AbstractController.extend({
         case "progress":
           this.send("openModal", {
             title: "Cannot sort!",
-            content: `Sorting on ${columnName} is disabled for running DAGs!`
+            content: `Sorting on ${columnName} is disabled for running DAGs while Auto Refresh is enabled!`
           });
           return false;
       }

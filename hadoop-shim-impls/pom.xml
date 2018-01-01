@@ -20,28 +20,19 @@
   <parent>
     <artifactId>tez</artifactId>
     <groupId>org.apache.tez</groupId>
-    <version>0.9.0-SNAPSHOT</version>
+    <version>0.9.1-SNAPSHOT</version>
   </parent>
   <artifactId>hadoop-shim-impls</artifactId>
   <packaging>pom</packaging>
 
   <profiles>
     <profile>
-      <id>hadoop24</id>
-      <activation>
-        <activeByDefault>false</activeByDefault>
-      </activation>
-      <modules>
-        <module>hadoop-shim-2.4</module>
-      </modules>
-    </profile>
-    <profile>
-      <id>hadoop26</id>
+      <id>hadoop27</id>
       <activation>
         <activeByDefault>true</activeByDefault>
       </activation>
       <modules>
-        <module>hadoop-shim-2.6</module>
+        <module>hadoop-shim-2.7</module>
       </modules>
     </profile>
     <profile>

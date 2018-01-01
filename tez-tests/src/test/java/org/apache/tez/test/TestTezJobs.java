@@ -54,6 +54,8 @@ import org.apache.tez.common.counters.TezCounters;
 import org.apache.tez.dag.api.Edge;
 import org.apache.tez.dag.api.client.StatusGetOpts;
 import org.apache.tez.dag.api.client.VertexStatus;
+import org.apache.tez.mapreduce.examples.CartesianProduct;
+import org.apache.tez.runtime.library.cartesianproduct.CartesianProductVertexManager;
 import org.apache.tez.runtime.library.conf.OrderedPartitionedKVEdgeConfig;
 import org.apache.tez.runtime.library.partitioner.HashPartitioner;
 import org.slf4j.Logger;
@@ -138,6 +140,7 @@ public class TestTezJobs {
       mrrTezCluster = new MiniTezCluster(TestTezJobs.class.getName(), 1, 1, 1);
       Configuration conf = new Configuration();
       conf.set("fs.defaultFS", remoteFs.getUri().toString()); // use HDFS
+      conf.setLong(TezConfiguration.TEZ_AM_SLEEP_TIME_BEFORE_EXIT_MILLIS, 500);
       mrrTezCluster.init(conf);
       mrrTezCluster.start();
     }
@@ -1210,7 +1213,7 @@ public class TestTezJobs {
       tezConf.setInt(TezConfiguration.TEZ_AM_CLIENT_HEARTBEAT_TIMEOUT_SECS, 5);
       TezClient tezClient = TezClient.create("testAMClientHeartbeatTimeout", tezConf, true);
       tezClient.start();
-      tezClient.cancelAMKeepAlive();
+      tezClient.cancelAMKeepAlive(true);
 
       ApplicationId appId = tezClient.getAppMasterApplicationId();
 
@@ -1331,5 +1334,16 @@ public class TestTezJobs {
     } finally {
       tezClient.stop();
     }
+  }
+
+  @Test(timeout = 60000)
+  public void testCartesianProduct() throws Exception {
+    LOG.info("Running CartesianProduct Test");
+    CartesianProduct job = new CartesianProduct();
+
+    TezConfiguration tezConf = new TezConfiguration(mrrTezCluster.getConfig());
+    tezConf.setInt(CartesianProductVertexManager.TEZ_CARTESIAN_PRODUCT_MAX_PARALLELISM, 10);
+    tezConf.setInt(CartesianProductVertexManager.TEZ_CARTESIAN_PRODUCT_MIN_OPS_PER_WORKER, 25);
+    Assert.assertEquals("CartesianProduct failed", job.run(tezConf, null, null), 0);
   }
 }

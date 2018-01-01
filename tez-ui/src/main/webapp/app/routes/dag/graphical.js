@@ -20,7 +20,12 @@ import Ember from 'ember';
 import MultiAmPollsterRoute from '../multi-am-pollster';
 
 export default MultiAmPollsterRoute.extend({
-  title: "Graphical View",
+  title: Ember.computed(function () {
+    var dag = this.modelFor("dag"),
+      name = dag.get("name"),
+      entityID = dag.get("entityID");
+    return `Graphical View: ${name} (${entityID})`;
+  }).volatile(),
 
   loaderNamespace: "dag",
 
@@ -30,6 +35,9 @@ export default MultiAmPollsterRoute.extend({
   },
 
   load: function (value, query, options) {
+    options = Ember.$.extend({
+      demandNeeds: ["info", "dag"]
+    }, options);
     return this.get("loader").query('vertex', {
       dagID: this.modelFor("dag").get("id")
     }, options);

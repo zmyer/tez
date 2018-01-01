@@ -69,13 +69,12 @@ public class TezConstants {
     TezConfiguration.TEZ_SESSION_PREFIX + "local-resources.pb";
   
   public static final String TEZ_APPLICATION_TYPE = "TEZ";
-
   /**
    * The service id for the NodeManager plugin used to share intermediate data
    * between vertices.
    */
   public static final String TEZ_SHUFFLE_HANDLER_SERVICE_ID = "mapreduce_shuffle";
-  
+
   public static final String TEZ_PREWARM_DAG_NAME_PREFIX = "TezPreWarmDAG";
 
   public static final String DAG_RECOVERY_DATA_DIR_NAME = "recovery";
@@ -123,5 +122,11 @@ public class TezConstants {
    */
   public static final long TEZ_AM_CLIENT_HEARTBEAT_POLL_INTERVAL_MILLIS_MINIMUM = 1000;
 
+  /**
+   * For container JVM Xmx auto determination
+   */
+  public static final int TEZ_CONTAINER_SMALL_SLAB_BOUND_MB = 4096;
+  public static final double TEZ_CONTAINER_MAX_JAVA_HEAP_FRACTION_SMALL_SLAB = 0.7;
+  public static final double TEZ_CONTAINER_MAX_JAVA_HEAP_FRACTION_LARGE_SLAB = 0.8;
 
 }

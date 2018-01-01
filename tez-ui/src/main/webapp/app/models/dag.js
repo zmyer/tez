@@ -19,9 +19,9 @@
 import Ember from 'ember';
 import DS from 'ember-data';
 
-import AMTimelineModel from './am-timeline';
+import DAGInfoModel from './dag-info';
 
-export default AMTimelineModel.extend({
+export default DAGInfoModel.extend({
   needs: {
     am: {
       type: "dagAm",
@@ -43,6 +43,17 @@ export default AMTimelineModel.extend({
     app: {
       type: ["AhsApp", "appRm"],
       idKey: "appID",
+      loadType: function (record) {
+        if(record.get("queueName") && record.get("atsStatus") !== "RUNNING") {
+          return "demand";
+        }
+      },
+      silent: true
+    },
+    info: {
+      type: "dagInfo",
+      idKey: "entityID",
+      loadType: "demand",
       silent: true
     }
   },
@@ -52,23 +63,41 @@ export default AMTimelineModel.extend({
   submitter: DS.attr("string"),
 
   // Serialize when required
-  vertices: DS.attr('object'),
-  edges: DS.attr('object'),
-  vertexGroups: DS.attr('object'),
+  vertices: Ember.computed.or("dagPlan.vertices", "info.dagPlan.vertices"),
+  edges: Ember.computed.or("dagPlan.edges", "info.dagPlan.edges"),
+  vertexGroups: Ember.computed.or("dagPlan.vertexGroups", "info.dagPlan.vertexGroups"),
 
   domain: DS.attr("string"),
   containerLogs: DS.attr("object"),
-  queue: Ember.computed("app", function () {
-    return this.get("app.queue");
+  queueName: DS.attr("string"),
+  queue: Ember.computed("queueName", "app", function () {
+    return this.get("queueName") || this.get("app.queue");
   }),
 
   vertexIdNameMap: DS.attr("object"),
   vertexNameIdMap: DS.attr("object"),
 
   callerID: DS.attr("string"),
-  callerContext: DS.attr("string"),
-  callerDescription: DS.attr("string"),
-  callerType: DS.attr("string"),
+  callerContext: Ember.computed.or("callerData.callerContext", "info.callerData.callerContext"),
+  callerDescription: Ember.computed.or("callerData.callerDescription", "info.callerData.callerDescription"),
+  callerType: Ember.computed.or("callerData.callerType", "info.callerData.callerType"),
 
   amWsVersion: DS.attr("string"),
+  failedTaskAttempts: DS.attr("number"),
+
+  finalStatus: Ember.computed("status", "failedTaskAttempts", function () {
+    var status = this.get("status");
+    if(status === "SUCCEEDED" && this.get("failedTaskAttempts")) {
+      status = "SUCCEEDED_WITH_FAILURES";
+    }
+    return status;
+  }),
+
+  info: DS.attr("object"),
+
+  counterGroupsHash: Ember.computed("am.counterGroupsHash", "_counterGroups", "info.counterGroupsHash", function () {
+    var amCounters = this.get("am.counterGroupsHash"),
+        atsCounters = this.get("info.counterGroupsHash") || this._super();
+    return amCounters ? Ember.$.extend({}, atsCounters, amCounters) : atsCounters;
+  })
 });

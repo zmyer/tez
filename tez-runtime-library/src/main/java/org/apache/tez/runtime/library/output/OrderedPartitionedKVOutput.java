@@ -187,6 +187,7 @@ public class OrderedPartitionedKVOutput extends AbstractLogicalOutput {
       sorter.close();
       this.endTime = System.nanoTime();
       returnEvents = generateEvents();
+      sorter = null;
     } else {
       LOG.warn(getContext().getDestinationVertexName() +
           ": Attempting to close output {} of type {} before it was started. Generating empty events",
@@ -201,10 +202,12 @@ public class OrderedPartitionedKVOutput extends AbstractLogicalOutput {
     List<Event> eventList = Lists.newLinkedList();
     if (finalMergeEnabled && !pipelinedShuffle) {
       boolean isLastEvent = true;
+      String auxiliaryService = conf.get(TezConfiguration.TEZ_AM_SHUFFLE_AUXILIARY_SERVICE_ID,
+          TezConfiguration.TEZ_AM_SHUFFLE_AUXILIARY_SERVICE_ID_DEFAULT);
       ShuffleUtils.generateEventOnSpill(eventList, finalMergeEnabled, isLastEvent,
           getContext(), 0, new TezSpillRecord(sorter.getFinalIndexFile(), conf),
           getNumPhysicalOutputs(), sendEmptyPartitionDetails, getContext().getUniqueIdentifier(),
-          sorter.getPartitionStats(), sorter.reportDetailedPartitionStats(), deflater);
+          sorter.getPartitionStats(), sorter.reportDetailedPartitionStats(), auxiliaryService, deflater);
     }
     return eventList;
   }
@@ -249,6 +252,7 @@ public class OrderedPartitionedKVOutput extends AbstractLogicalOutput {
     confKeys.add(TezConfiguration.TEZ_COUNTERS_MAX_GROUPS);
     confKeys.add(TezRuntimeConfiguration.TEZ_RUNTIME_SORTER_CLASS);
     confKeys.add(TezRuntimeConfiguration.TEZ_RUNTIME_CLEANUP_FILES_ON_INTERRUPT);
+    confKeys.add(TezConfiguration.TEZ_AM_SHUFFLE_AUXILIARY_SERVICE_ID);
   }
 
   // TODO Maybe add helper methods to extract keys

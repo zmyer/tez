@@ -94,6 +94,7 @@ import org.apache.tez.dag.records.TezDAGID;
 import org.apache.tez.dag.records.TezTaskAttemptID;
 import org.apache.tez.dag.records.TezTaskID;
 import org.apache.tez.dag.records.TezVertexID;
+import org.apache.tez.hadoop.shim.HadoopShimsLoader;
 import org.apache.tez.runtime.api.impl.TaskSpec;
 import org.apache.tez.serviceplugins.api.ServicePluginErrorDefaults;
 import org.apache.tez.serviceplugins.api.ServicePluginException;
@@ -130,7 +131,8 @@ public class TestTaskSchedulerManager {
                                     ContainerSignatureMatcher containerSignatureMatcher,
                                     WebUIService webUI) {
       super(appContext, clientService, eventHandler, containerSignatureMatcher, webUI,
-          Lists.newArrayList(new NamedEntityDescriptor("FakeDescriptor", null)), false);
+          Lists.newArrayList(new NamedEntityDescriptor("FakeDescriptor", null)), false,
+          new HadoopShimsLoader(appContext.getAMConf()).getHadoopShim());
     }
 
     @Override
@@ -394,31 +396,53 @@ public class TestTaskSchedulerManager {
 
     // ensure history url is empty when timeline server is not the logging class
     conf.set(TezConfiguration.TEZ_HISTORY_URL_BASE, "http://ui-host:9999");
-    assertTrue("http://ui-host:9999/#/tez-app/TEST_APP_ID"
-        .equals(schedulerHandler.getHistoryUrl()));
+    assertEquals("http://ui-host:9999/#/tez-app/TEST_APP_ID",
+        schedulerHandler.getHistoryUrl());
 
     // ensure the trailing / in history url is handled
     conf.set(TezConfiguration.TEZ_HISTORY_URL_BASE, "http://ui-host:9998/");
-    assertTrue("http://ui-host:9998/#/tez-app/TEST_APP_ID"
-        .equals(schedulerHandler.getHistoryUrl()));
+    assertEquals("http://ui-host:9998/#/tez-app/TEST_APP_ID",
+        schedulerHandler.getHistoryUrl());
 
     // ensure missing scheme in history url is handled
     conf.set(TezConfiguration.TEZ_HISTORY_URL_BASE, "ui-host:9998/");
-    Assert.assertTrue("http://ui-host:9998/#/tez-app/TEST_APP_ID"
-        .equals(schedulerHandler.getHistoryUrl()));
+    assertEquals("http://ui-host:9998/#/tez-app/TEST_APP_ID",
+        schedulerHandler.getHistoryUrl());
 
     // handle bad template ex without begining /
     conf.set(TezConfiguration.TEZ_AM_TEZ_UI_HISTORY_URL_TEMPLATE,
         "__HISTORY_URL_BASE__#/somepath");
-    assertTrue("http://ui-host:9998/#/somepath"
-        .equals(schedulerHandler.getHistoryUrl()));
+    assertEquals("http://ui-host:9998/#/somepath",
+        schedulerHandler.getHistoryUrl());
 
     conf.set(TezConfiguration.TEZ_AM_TEZ_UI_HISTORY_URL_TEMPLATE,
         "__HISTORY_URL_BASE__?viewPath=tez-app/__APPLICATION_ID__");
     conf.set(TezConfiguration.TEZ_HISTORY_URL_BASE, "http://localhost/ui/tez");
-    assertTrue("http://localhost/ui/tez?viewPath=tez-app/TEST_APP_ID"
-        .equals(schedulerHandler.getHistoryUrl()));
+    assertEquals("http://localhost/ui/tez?viewPath=tez-app/TEST_APP_ID",
+        schedulerHandler.getHistoryUrl());
 
+  }
+
+  @Test (timeout = 5000)
+  public void testHistoryUrlWithoutScheme() throws Exception {
+    Configuration conf = schedulerHandler.appContext.getAMConf();
+    final ApplicationId mockApplicationId = mock(ApplicationId.class);
+    doReturn("TEST_APP_ID").when(mockApplicationId).toString();
+    doReturn(mockApplicationId).when(mockAppContext).getApplicationID();
+
+    conf.set(TezConfiguration.TEZ_HISTORY_URL_BASE, "/foo/bar/");
+    conf.setBoolean(TezConfiguration.TEZ_AM_UI_HISTORY_URL_SCHEME_CHECK_ENABLED, false);
+    assertEquals("/foo/bar/#/tez-app/TEST_APP_ID",
+        schedulerHandler.getHistoryUrl());
+
+    conf.set(TezConfiguration.TEZ_HISTORY_URL_BASE, "ui-host:9998/foo/bar/");
+    assertEquals("ui-host:9998/foo/bar/#/tez-app/TEST_APP_ID",
+        schedulerHandler.getHistoryUrl());
+
+    conf.setBoolean(TezConfiguration.TEZ_AM_UI_HISTORY_URL_SCHEME_CHECK_ENABLED, true);
+    conf.set(TezConfiguration.TEZ_HISTORY_URL_BASE, "ui-host:9998/foo/bar/");
+    assertEquals("http://ui-host:9998/foo/bar/#/tez-app/TEST_APP_ID",
+        schedulerHandler.getHistoryUrl());
   }
 
   @Test(timeout = 5000)
@@ -546,6 +570,23 @@ public class TestTaskSchedulerManager {
 
   @SuppressWarnings("unchecked")
   @Test(timeout = 5000)
+  public void testShutdownBeforeStartTaskScheduler() {
+    Configuration conf = new TezConfiguration();
+    AppContext appContext = mock(AppContext.class, RETURNS_DEEP_STUBS);
+    doReturn(conf).when(appContext).getAMConf();
+
+    List<NamedEntityDescriptor> list = new LinkedList<>();
+    list.add(null);
+
+    TaskSchedulerManager taskSchedulerManager =
+        new TaskSchedulerManager(appContext, null, null,
+            null, null, list, false,null);
+    assertFalse("Should not return true unless actually unregistered successfully",
+        taskSchedulerManager.hasUnregistered());
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test(timeout = 5000)
   public void testReportFailureFromTaskScheduler() {
     String dagName = DAG_NAME;
     Configuration conf = new TezConfiguration();
@@ -574,7 +615,8 @@ public class TestTaskSchedulerManager {
 
     TaskSchedulerManager taskSchedulerManager =
         new TaskSchedulerManager(appContext, dagClientServer, eventHandler,
-            mock(ContainerSignatureMatcher.class), mock(WebUIService.class), list, false) {
+            mock(ContainerSignatureMatcher.class), mock(WebUIService.class), list, false,
+            new HadoopShimsLoader(appContext.getAMConf()).getHadoopShim()) {
           @Override
           TaskSchedulerContext wrapTaskSchedulerContext(TaskSchedulerContext rawContext) {
             // Avoid wrapping in threads
@@ -638,8 +680,7 @@ public class TestTaskSchedulerManager {
     doReturn(address).when(mockClientService).getBindAddress();
     TaskSchedulerManager taskSchedulerManager =
         new TaskSchedulerManager(taskScheduler, appContext, mock(ContainerSignatureMatcher.class),
-            mockClientService,
-            Executors.newFixedThreadPool(1)) {
+            mockClientService, Executors.newFixedThreadPool(1)) {
           @Override
           protected void instantiateSchedulers(String host, int port, String trackingUrl,
                                                AppContext appContext) throws TezException {
@@ -726,7 +767,8 @@ public class TestTaskSchedulerManager {
                                          List<NamedEntityDescriptor> schedulerDescriptors,
                                          boolean isPureLocalMode) {
       super(appContext, clientService, eventHandler, containerSignatureMatcher, webUI,
-          schedulerDescriptors, isPureLocalMode);
+          schedulerDescriptors, isPureLocalMode,
+          new HadoopShimsLoader(appContext.getAMConf()).getHadoopShim());
       yarnTaskScheduler = mock(TaskScheduler.class);
       uberTaskScheduler = mock(TaskScheduler.class);
     }

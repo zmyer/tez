@@ -173,6 +173,16 @@ public class TezRuntimeConfiguration {
   public static final int TEZ_RUNTIME_PIPELINED_SORTER_SORT_THREADS_DEFAULT = 2;
 
   /**
+   * Integer value. Percentage of buffer to be filled before we spill to disk. Default value is 0,
+   * which will spill for every buffer.
+   */
+  @ConfigurationProperty(type="int")
+  public static final String TEZ_RUNTIME_UNORDERED_PARTITIONED_KVWRITER_BUFFER_MERGE_PERCENT =
+      TEZ_RUNTIME_PREFIX + "unordered-partitioned-kvwriter.buffer-merge-percent";
+  public static final int TEZ_RUNTIME_UNORDERED_PARTITIONED_KVWRITER_BUFFER_MERGE_PERCENT_DEFAULT =
+      0;
+
+  /**
    * Report partition statistics (e.g better scheduling in ShuffleVertexManager). TEZ-2496
    * This can be enabled/disabled at vertex level.
    * {@link org.apache.tez.runtime.library.api.TezRuntimeConfiguration.ReportPartitionStats}
@@ -417,6 +427,13 @@ public class TezRuntimeConfiguration {
   public static final boolean TEZ_RUNTIME_SHUFFLE_ENABLE_MEMTOMEM_DEFAULT =
       false;
 
+  @Private
+  @Unstable
+  @ConfigurationProperty(type = "boolean")
+  public static final String TEZ_RUNTIME_SHUFFLE_FETCHER_USE_SHARED_POOL = TEZ_RUNTIME_PREFIX +
+      "shuffle.fetcher.use-shared-pool";
+  public static final boolean TEZ_RUNTIME_SHUFFLE_FETCHER_USE_SHARED_POOL_DEFAULT = false;
+
   @ConfigurationProperty(type = "float")
   public static final String TEZ_RUNTIME_INPUT_POST_MERGE_BUFFER_PERCENT = TEZ_RUNTIME_PREFIX +
       "task.input.post-merge.buffer.percent";
@@ -590,6 +607,8 @@ public class TezRuntimeConfiguration {
     tezRuntimeKeys.add(TEZ_RUNTIME_CONVERT_USER_PAYLOAD_TO_HISTORY_TEXT);
     tezRuntimeKeys.add(TEZ_RUNTIME_SORTER_CLASS);
     tezRuntimeKeys.add(TEZ_RUNTIME_CLEANUP_FILES_ON_INTERRUPT);
+    tezRuntimeKeys.add(TEZ_RUNTIME_UNORDERED_PARTITIONED_KVWRITER_BUFFER_MERGE_PERCENT);
+    tezRuntimeKeys.add(TEZ_RUNTIME_SHUFFLE_FETCHER_USE_SHARED_POOL);
 
     defaultConf.addResource("core-default.xml");
     defaultConf.addResource("core-site.xml");

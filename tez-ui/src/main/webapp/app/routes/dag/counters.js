@@ -20,7 +20,12 @@ import Ember from 'ember';
 import SingleAmPollsterRoute from '../single-am-pollster';
 
 export default SingleAmPollsterRoute.extend({
-  title: "DAG Details",
+  title: Ember.computed(function () {
+    var dag = this.modelFor("dag"),
+      name = dag.get("name"),
+      entityID = dag.get("entityID");
+    return `DAG Counters: ${name} (${entityID})`;
+  }).volatile(),
 
   loaderNamespace: "dag",
 
@@ -30,6 +35,9 @@ export default SingleAmPollsterRoute.extend({
   },
 
   load: function (value, query, options) {
+    options = Ember.$.extend({
+      demandNeeds: ["info"]
+    }, options);
     return this.get("loader").queryRecord('dag', this.modelFor("dag").get("id"), options);
   },
 

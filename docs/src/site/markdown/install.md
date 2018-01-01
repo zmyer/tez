@@ -21,8 +21,10 @@ Install/Deploy Instructions for Tez
 ---------------------------------------------------------------------------
 Replace x.y.z with the tez release number that you are using. E.g. 0.5.0. For Tez 
 versions 0.8.3 and higher, Tez needs Apache Hadoop to be of version 2.6.0 or higher.
+For Tez version 0.9.0 and higher, Tez needs Apache Hadoop to be version 2.7.0
+or higher.
 
-1.  Deploy Apache Hadoop using version of 2.6.0 or higher.
+1.  Deploy Apache Hadoop using version of 2.7.0 or higher.
     -   You need to change the value of the hadoop.version property in the
         top-level pom.xml to match the version of the hadoop branch being used.
 
@@ -31,7 +33,7 @@ versions 0.8.3 and higher, Tez needs Apache Hadoop to be of version 2.6.0 or hig
     ```
 
 2.  Build tez using `mvn clean package -DskipTests=true -Dmaven.javadoc.skip=true`
-    -   This assumes that you have already installed JDK6 or later and Maven 3 or later.
+    -   This assumes that you have already installed JDK8 or later and Maven 3 or later.
     -   Tez also requires Protocol Buffers 2.5.0, including the protoc-compiler.
         *   This can be downloaded from https://github.com/google/protobuf/tags/.
         *   On Mac OS X with the homebrew package manager `brew install protobuf250`
@@ -55,8 +57,8 @@ versions 0.8.3 and higher, Tez needs Apache Hadoop to be of version 2.6.0 or hig
         command would be
 
     ```
-    hadoop dfs -mkdir /apps/tez-x.y.z-SNAPSHOT
-    hadoop dfs -copyFromLocal tez-dist/target/tez-x.y.z-SNAPSHOT-archive.tar.gz /apps/tez-x.y.z-SNAPSHOT/
+    hadoop fs -mkdir /apps/tez-x.y.z-SNAPSHOT
+    hadoop fs -copyFromLocal tez-dist/target/tez-x.y.z-SNAPSHOT.tar.gz /apps/tez-x.y.z-SNAPSHOT/
     ```
 
     -   tez-site.xml configuration.

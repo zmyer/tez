@@ -86,6 +86,12 @@ public interface Vertex extends Comparable<Vertex> {
    */
   TezCounters getCachedCounters();
 
+  /**
+   * Add custom counters to the vertex
+   * @param tezCounters counters to add
+   */
+  void addCounters(TezCounters tezCounters);
+
   int getMaxTaskConcurrency();
   Map<TezTaskID, Task> getTasks();
   Task getTask(TezTaskID taskID);
@@ -149,7 +155,7 @@ public interface Vertex extends Comparable<Vertex> {
   List<InputSpec> getInputSpecList(int taskIndex) throws AMUserCodeException;
   List<OutputSpec> getOutputSpecList(int taskIndex) throws AMUserCodeException;
   
-  List<GroupInputSpec> getGroupInputSpecList(int taskIndex);
+  List<GroupInputSpec> getGroupInputSpecList();
   void addSharedOutputs(Set<String> outputs);
   Set<String> getSharedOutputs();
 
@@ -200,4 +206,12 @@ public interface Vertex extends Comparable<Vertex> {
   void reportTaskStartTime(long taskStartTime);
   public long getFirstTaskStartTime();
   public long getLastTaskFinishTime();
+
+  VertexConfig getVertexConfig();
+
+  interface VertexConfig {
+    int getMaxFailedTaskAttempts();
+    boolean getTaskRescheduleHigherPriority();
+    boolean getTaskRescheduleRelaxedLocality();
+  }
 }

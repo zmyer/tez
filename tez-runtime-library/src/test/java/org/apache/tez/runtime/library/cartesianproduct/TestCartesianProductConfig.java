@@ -20,6 +20,8 @@ package org.apache.tez.runtime.library.cartesianproduct;
 import com.google.common.primitives.Ints;
 import org.apache.tez.dag.api.TezConfiguration;
 import org.apache.tez.dag.api.UserPayload;
+import org.apache.tez.runtime.library.cartesianproduct.CartesianProductUserPayload.CartesianProductConfigProto;
+import org.junit.Before;
 import org.junit.Test;
 
 import java.io.IOException;
@@ -32,11 +34,16 @@ import java.util.Random;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 
 public class TestCartesianProductConfig {
-  private TezConfiguration conf = new TezConfiguration();
+  private TezConfiguration conf;
+
+  @Before
+  public void setup() {
+    conf = new TezConfiguration();
+  }
 
   @Test(timeout = 5000)
   public void testSerializationPartitioned() throws IOException {
@@ -58,7 +65,7 @@ public class TestCartesianProductConfig {
   }
 
   @Test(timeout = 5000)
-  public void testSerializationUnpartitioned() throws Exception {
+  public void testSerializationFair() throws Exception {
     List<String> sourceVertices = new ArrayList<>();
     sourceVertices.add("v1");
     sourceVertices.add("v2");
@@ -69,7 +76,7 @@ public class TestCartesianProductConfig {
     CartesianProductConfig parsedConfig = CartesianProductConfig.fromUserPayload(payload);
     assertConfigEquals(config, parsedConfig);
 
-    // unpartitioned config should have null in numPartitions fields
+    // fair cartesian product config should have null in numPartitions fields
     try {
       config = new CartesianProductConfig(false, new int[]{}, new String[]{"v0","v1"},null);
       config.checkNumPartitions();
@@ -102,5 +109,37 @@ public class TestCartesianProductConfig {
       assertNull(descriptor1);
       assertNull(descriptor2);
     }
+  }
+
+  @Test(timeout = 5000)
+  public void testFairCartesianProductConfig() {
+    List<String> sourceVertices = new ArrayList<>();
+    sourceVertices.add("v0");
+    sourceVertices.add("v1");
+    CartesianProductConfig config = new CartesianProductConfig(sourceVertices);
+
+    // conf not set
+    CartesianProductConfigProto proto = config.toProto(conf);
+    assertEquals(CartesianProductVertexManager.TEZ_CARTESIAN_PRODUCT_MAX_PARALLELISM_DEFAULT,
+      proto.getMaxParallelism());
+    assertEquals(CartesianProductVertexManager.TEZ_CARTESIAN_PRODUCT_MIN_OPS_PER_WORKER_DEFAULT,
+      proto.getMinOpsPerWorker());
+    assertEquals(CartesianProductVertexManager.TEZ_CARTESIAN_PRODUCT_ENABLE_GROUPING_DEFAULT,
+      proto.getEnableGrouping());
+    assertFalse(proto.hasNumPartitionsForFairCase());
+    assertFalse(proto.hasGroupingFraction());
+
+    // conf set
+    conf.setInt(CartesianProductVertexManager.TEZ_CARTESIAN_PRODUCT_MAX_PARALLELISM, 1000);
+    conf.setLong(CartesianProductVertexManager.TEZ_CARTESIAN_PRODUCT_MIN_OPS_PER_WORKER, 1000000);
+    conf.setBoolean(CartesianProductVertexManager.TEZ_CARTESIAN_PRODUCT_ENABLE_GROUPING, false);
+    conf.setFloat(CartesianProductVertexManager.TEZ_CARTESIAN_PRODUCT_GROUPING_FRACTION, 0.75f);
+    conf.setInt(CartesianProductVertexManager.TEZ_CARTESIAN_PRODUCT_NUM_PARTITIONS, 25);
+    proto = config.toProto(conf);
+    assertEquals(1000, proto.getMaxParallelism());
+    assertEquals(1000000, proto.getMinOpsPerWorker());
+    assertFalse(proto.getEnableGrouping());
+    assertEquals(0.75f, proto.getGroupingFraction(), 0.01);
+    assertEquals(25, proto.getNumPartitionsForFairCase());
   }
 }

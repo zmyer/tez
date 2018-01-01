@@ -34,13 +34,16 @@ import org.apache.tez.common.TezRuntimeFrameworkConfigs;
 import org.apache.tez.common.counters.TaskCounter;
 import org.apache.tez.common.counters.TezCounter;
 import org.apache.tez.common.counters.TezCounters;
+import org.apache.tez.dag.api.TezConfiguration;
 import org.apache.tez.runtime.api.Event;
 import org.apache.tez.runtime.api.ExecutionContext;
 import org.apache.tez.runtime.api.OutputContext;
 import org.apache.tez.runtime.api.OutputStatisticsReporter;
+import org.apache.tez.runtime.api.TaskContext;
 import org.apache.tez.runtime.api.impl.ExecutionContextImpl;
 import org.apache.tez.runtime.library.api.TezRuntimeConfiguration;
 import org.apache.tez.runtime.library.api.TezRuntimeConfiguration.ReportPartitionStats;
+import org.apache.tez.runtime.library.common.combine.Combiner;
 import org.apache.tez.runtime.library.common.shuffle.ShuffleUtils;
 import org.apache.tez.runtime.library.conf.OrderedPartitionedKVOutputConfig.SorterImpl;
 import org.apache.tez.runtime.library.partitioner.HashPartitioner;
@@ -57,6 +60,7 @@ import java.util.Map;
 import java.util.TreeMap;
 import java.util.UUID;
 
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Matchers.anyListOf;
 import static org.mockito.Mockito.atLeastOnce;
@@ -99,7 +103,9 @@ public class TestPipelinedSorter {
     ApplicationId appId = ApplicationId.newInstance(10000, 1);
     TezCounters counters = new TezCounters();
     String uniqueId = UUID.randomUUID().toString();
-    this.outputContext = createMockOutputContext(counters, appId, uniqueId);
+    String auxiliaryService = getConf().get(TezConfiguration.TEZ_AM_SHUFFLE_AUXILIARY_SERVICE_ID,
+        TezConfiguration.TEZ_AM_SHUFFLE_AUXILIARY_SERVICE_ID_DEFAULT);
+    this.outputContext = createMockOutputContext(counters, appId, uniqueId, auxiliaryService);
   }
 
   public static Configuration getConf() {
@@ -172,9 +178,63 @@ public class TestPipelinedSorter {
     // final merge is disabled. Final output file would not be populated in this case.
     assertTrue(sorter.finalOutputFile == null);
     TezCounter numShuffleChunks = outputContext.getCounters().findCounter(TaskCounter.SHUFFLE_CHUNK_COUNT);
-    assertTrue(sorter.getNumSpills() == numShuffleChunks.getValue());
+//    assertTrue(sorter.getNumSpills() == numShuffleChunks.getValue());
     conf.setBoolean(TezRuntimeConfiguration.TEZ_RUNTIME_ENABLE_FINAL_MERGE_IN_OUTPUT, true);
 
+  }
+
+  @Test
+  public void testEmptyPartitionsTwoSpillsNoEmptyEvents() throws Exception {
+    testEmptyPartitionsHelper(2, false);
+  }
+
+  @Test
+  public void testEmptyPartitionsTwoSpillsWithEmptyEvents() throws Exception {
+    testEmptyPartitionsHelper(2, true);
+  }
+
+  @Test
+  public void testEmptyPartitionsNoSpillsNoEmptyEvents() throws Exception {
+    testEmptyPartitionsHelper(0, false);
+  }
+
+  @Test
+  public void testEmptyPartitionsNoSpillsWithEmptyEvents() throws Exception {
+    testEmptyPartitionsHelper(0, true);
+  }
+
+  public void testEmptyPartitionsHelper(int numKeys, boolean sendEmptyPartitionDetails) throws IOException, InterruptedException {
+    int partitions = 50;
+    this.numOutputs = partitions;
+    this.initialAvailableMem = 1 *1024 * 1024;
+    Configuration conf = getConf();
+    conf.setBoolean(TezRuntimeConfiguration.TEZ_RUNTIME_EMPTY_PARTITION_INFO_VIA_EVENTS_ENABLED, sendEmptyPartitionDetails);
+    conf.setBoolean(TezRuntimeConfiguration.TEZ_RUNTIME_ENABLE_FINAL_MERGE_IN_OUTPUT, true);
+    conf.setInt(TezRuntimeConfiguration
+        .TEZ_RUNTIME_PIPELINED_SORTER_MIN_BLOCK_SIZE_IN_MB, 1);
+    PipelinedSorter sorter = new PipelinedSorter(this.outputContext, conf, partitions,
+        initialAvailableMem);
+
+    writeData(sorter, numKeys, 1000000);
+    if (numKeys == 0) {
+      assertTrue(sorter.getNumSpills() == 1);
+    } else {
+      assertTrue(sorter.getNumSpills() == numKeys + 1);
+    }
+    verifyCounters(sorter, outputContext);
+    Path indexFile = sorter.getFinalIndexFile();
+    TezSpillRecord spillRecord = new TezSpillRecord(indexFile, conf);
+    for (int i = 0; i < partitions; i++) {
+      TezIndexRecord tezIndexRecord = spillRecord.getIndex(i);
+      if (tezIndexRecord.hasData()) {
+        continue;
+      }
+      if (sendEmptyPartitionDetails) {
+        Assert.assertEquals("Unexpected raw length for " + i + "th partition", 0, tezIndexRecord.getRawLength());
+      } else {
+        Assert.assertEquals("Unexpected raw length for " + i + "th partition", 6, tezIndexRecord.getRawLength());
+      }
+    }
   }
 
   @Test
@@ -364,6 +424,75 @@ public class TestPipelinedSorter {
     verifyCounters(sorter, outputContext);
   }
 
+  @Test
+  public void testMultipleSpills() throws IOException {
+    Configuration conf = getConf();
+    conf.setBoolean(TezRuntimeConfiguration.TEZ_RUNTIME_ENABLE_FINAL_MERGE_IN_OUTPUT, true);
+    this.numOutputs = 5;
+    this.initialAvailableMem = 5 * 1024 * 1024;
+    conf.setInt(TezRuntimeConfiguration
+        .TEZ_RUNTIME_PIPELINED_SORTER_MIN_BLOCK_SIZE_IN_MB, 3);
+    PipelinedSorter sorter = new PipelinedSorter(this.outputContext, conf, numOutputs,
+        initialAvailableMem);
+
+    writeData(sorter, 25000, 1000);
+    assertFalse("Expecting needsRLE to be false", sorter.needsRLE());
+    verifyCounters(sorter, outputContext);
+  }
+
+  @Test
+  public void testWithCombiner() throws IOException {
+    Configuration conf = getConf();
+    conf.setBoolean(TezRuntimeConfiguration.TEZ_RUNTIME_ENABLE_FINAL_MERGE_IN_OUTPUT, true);
+    conf.set(TezRuntimeConfiguration.TEZ_RUNTIME_COMBINER_CLASS, DummyCombiner.class.getName());
+    this.numOutputs = 5;
+    this.initialAvailableMem = 5 * 1024 * 1024;
+    conf.setInt(TezRuntimeConfiguration
+            .TEZ_RUNTIME_PIPELINED_SORTER_MIN_BLOCK_SIZE_IN_MB, 3);
+    PipelinedSorter sorter = new PipelinedSorter(this.outputContext, conf, numOutputs,
+            initialAvailableMem);
+
+    writeData(sorter, 1, 20);
+
+    Path outputFile = sorter.finalOutputFile;
+    FileSystem fs = outputFile.getFileSystem(conf);
+    IFile.Reader reader = new IFile.Reader(fs, outputFile, null, null, null, false, -1, 4096);
+    verifyData(reader);
+    reader.close();
+
+    verifyCounters(sorter, outputContext);
+  }
+
+  // for testWithCombiner
+  public static class DummyCombiner implements Combiner {
+    public DummyCombiner(TaskContext ctx) {
+      // do nothing
+    }
+
+    @Override
+    public void combine(TezRawKeyValueIterator rawIter, IFile.Writer writer) throws InterruptedException, IOException {
+      while (rawIter.next()) {
+        writer.append(rawIter.getKey(), rawIter.getValue());
+      }
+    }
+  }
+
+  @Test
+  public void testMultipleSpills_WithRLE() throws IOException {
+    Configuration conf = getConf();
+    conf.setBoolean(TezRuntimeConfiguration.TEZ_RUNTIME_ENABLE_FINAL_MERGE_IN_OUTPUT, true);
+    this.numOutputs = 5;
+    this.initialAvailableMem = 5 * 1024 * 1024;
+    conf.setInt(TezRuntimeConfiguration
+        .TEZ_RUNTIME_PIPELINED_SORTER_MIN_BLOCK_SIZE_IN_MB, 3);
+    PipelinedSorter sorter = new PipelinedSorter(this.outputContext, conf, numOutputs,
+        initialAvailableMem);
+
+    writeSimilarKeys(sorter, 25000, 1000, true);
+    assertTrue("Expecting needsRLE to be true", sorter.needsRLE());
+    verifyCounters(sorter, outputContext);
+  }
+
   public void basicTest2(int partitions, int[] numkeys, int[] keysize,
       long initialAvailableMem, int  blockSize) throws IOException {
     this.numOutputs = partitions; // single output
@@ -416,10 +545,14 @@ public class TestPipelinedSorter {
     verifyCounters(sorter, outputContext);
     Path outputFile = sorter.finalOutputFile;
     FileSystem fs = outputFile.getFileSystem(conf);
-    IFile.Reader reader = new IFile.Reader(fs, outputFile, null, null, null, false, -1, 4096);
+    TezCounter finalOutputBytes =
+        outputContext.getCounters().findCounter(TaskCounter.OUTPUT_BYTES_PHYSICAL);
+    if (finalOutputBytes.getValue() > 0) {
+      IFile.Reader reader = new IFile.Reader(fs, outputFile, null, null, null, false, -1, 4096);
+      verifyData(reader);
+      reader.close();
+    }
     //Verify dataset
-    verifyData(reader);
-    reader.close();
     verify(outputContext, atLeastOnce()).notifyProgress();
   }
 
@@ -450,11 +583,11 @@ public class TestPipelinedSorter {
 
     TezCounter finalOutputBytes =
         context.getCounters().findCounter(TaskCounter.OUTPUT_BYTES_PHYSICAL);
-    assertTrue(finalOutputBytes.getValue() > 0);
+    assertTrue(finalOutputBytes.getValue() >= 0);
 
     TezCounter outputBytesWithOverheadCounter = context.getCounters().findCounter
         (TaskCounter.OUTPUT_BYTES_WITH_OVERHEAD);
-    assertTrue(outputBytesWithOverheadCounter.getValue() > 0);
+    assertTrue(outputBytesWithOverheadCounter.getValue() >= 0);
   }
 
 
@@ -601,13 +734,13 @@ public class TestPipelinedSorter {
         numOutputs, (128l << 20));
     assertTrue("Expected 1 sort buffers. current len=" + sorter.buffers.size(),
         sorter.buffers.size() == 1);
-    assertTrue(sorter.buffers.get(0).capacity() == 32 * 1024 * 1024);
+    assertTrue(sorter.buffers.get(0).capacity() == 32 * 1024 * 1024 - 64);
     writeData(sorter, 100, 1024*1024, false); //100 1 MB KV. Will spill
 
     //Now it should have created 2 buffers, 32 & 96 MB buffers.
     assertTrue(sorter.buffers.size() == 2);
-    assertTrue(sorter.buffers.get(0).capacity() == 32 * 1024 * 1024);
-    assertTrue(sorter.buffers.get(1).capacity() == 96 * 1024 * 1024);
+    assertTrue(sorter.buffers.get(0).capacity() == 32 * 1024 * 1024 - 64);
+    assertTrue(sorter.buffers.get(1).capacity() == 96 * 1024 * 1024 + 64);
     closeSorter(sorter);
     verifyCounters(sorter, outputContext);
 
@@ -619,12 +752,12 @@ public class TestPipelinedSorter {
         .TEZ_RUNTIME_PIPELINED_SORTER_LAZY_ALLOCATE_MEMORY, true);
     sorter = new PipelinedSorter(this.outputContext, conf, numOutputs, (300l << 20));
     assertTrue(sorter.buffers.size() == 1);
-    assertTrue(sorter.buffers.get(0).capacity() == 32 * 1024 * 1024);
+    assertTrue(sorter.buffers.get(0).capacity() == 32 * 1024 * 1024 - 64);
 
     writeData(sorter, 50, 1024*1024, false); //50 1 MB KV to allocate 2nd buf
     assertTrue(sorter.buffers.size() == 2);
-    assertTrue(sorter.buffers.get(0).capacity() == 32 * 1024 * 1024);
-    assertTrue(sorter.buffers.get(1).capacity() == 268 * 1024 * 1024);
+    assertTrue(sorter.buffers.get(0).capacity() == 32 * 1024 * 1024 - 64);
+    assertTrue(sorter.buffers.get(1).capacity() == 268 * 1024 * 1024 + 64);
 
     //48 MB. Do not pre-allocate.
     // Get 32 MB buffer first invariably and proceed with the rest.
@@ -635,13 +768,13 @@ public class TestPipelinedSorter {
         numOutputs, (48l << 20));
     assertTrue("Expected 1 sort buffers. current len=" + sorter.buffers.size(),
         sorter.buffers.size() == 1);
-    assertTrue(sorter.buffers.get(0).capacity() == 32 * 1024 * 1024);
+    assertTrue(sorter.buffers.get(0).capacity() == 32 * 1024 * 1024 - 64);
     writeData(sorter, 20, 1024*1024, false); //100 1 MB KV. Will spill
 
     //Now it should have created 2 buffers, 32 & 96 MB buffers.
     assertTrue(sorter.buffers.size() == 2);
-    assertTrue(sorter.buffers.get(0).capacity() == 32 * 1024 * 1024);
-    assertTrue(sorter.buffers.get(1).capacity() == 16 * 1024 * 1024);
+    assertTrue(sorter.buffers.get(0).capacity() == 32 * 1024 * 1024 - 64);
+    assertTrue(sorter.buffers.get(1).capacity() == 16 * 1024 * 1024 + 64);
     closeSorter(sorter);
   }
 
@@ -701,6 +834,25 @@ public class TestPipelinedSorter {
     writeData(sorter, numKeys, keyLen, true);
   }
 
+  // duplicate some of the keys
+  private void writeSimilarKeys(ExternalSorter sorter, int numKeys, int keyLen,
+      boolean autoClose) throws IOException {
+    sortedDataMap.clear();
+    String keyStr = RandomStringUtils.randomAlphanumeric(keyLen);
+    for (int i = 0; i < numKeys; i++) {
+      if (i % 4 == 0) {
+        keyStr = RandomStringUtils.randomAlphanumeric(keyLen);
+      }
+      Text key = new Text(keyStr);
+      Text value = new Text(RandomStringUtils.randomAlphanumeric(keyLen));
+      sorter.write(key, value);
+      sortedDataMap.put(key.toString(), value.toString()); //for verifying data later
+    }
+    if (autoClose) {
+      closeSorter(sorter);
+    }
+  }
+
   private void writeData(ExternalSorter sorter, int numKeys, int keyLen,
       boolean autoClose) throws IOException {
     sortedDataMap.clear();
@@ -753,7 +905,7 @@ public class TestPipelinedSorter {
   }
 
   private static OutputContext createMockOutputContext(TezCounters counters, ApplicationId appId,
-      String uniqueId) throws IOException {
+      String uniqueId, String auxiliaryService) throws IOException {
     OutputContext outputContext = mock(OutputContext.class);
 
     ExecutionContext execContext = new ExecutionContextImpl("localhost");
@@ -761,8 +913,7 @@ public class TestPipelinedSorter {
     DataOutputBuffer serviceProviderMetaData = new DataOutputBuffer();
     serviceProviderMetaData.writeInt(80);
     doReturn(ByteBuffer.wrap(serviceProviderMetaData.getData())).when(outputContext)
-        .getServiceProviderMetaData
-            (ShuffleUtils.SHUFFLE_HANDLER_SERVICE_ID);
+        .getServiceProviderMetaData(auxiliaryService);
 
     doReturn(execContext).when(outputContext).getExecutionContext();
     doReturn(mock(OutputStatisticsReporter.class)).when(outputContext).getStatisticsReporter();

@@ -35,6 +35,8 @@ test('Basic creation test', function(assert) {
   assert.ok(serializer.maps.endTime);
   assert.ok(serializer.maps.containerLogs);
   assert.ok(serializer.maps.vertexIdNameMap);
+
+  assert.equal(Object.keys(serializer.get("maps")).length, 13 + 7); //13 own & 9 inherited (2 overwritten)
 });
 
 test('atsStatus test', function(assert) {
@@ -156,9 +158,9 @@ test('normalizeResourceHash test', function(assert) {
     }
   }).data;
 
-  assert.equal(data.callerContext, callerInfo.context);
-  assert.equal(data.callerDescription, callerInfo.description);
-  assert.equal(data.callerType, callerInfo.callerType);
+  assert.equal(data.callerData.callerContext, callerInfo.context);
+  assert.equal(data.callerData.callerDescription, callerInfo.description);
+  assert.equal(data.callerData.callerType, callerInfo.callerType);
 
   // dagInfo test
   data = serializer.normalizeResourceHash({
@@ -171,9 +173,9 @@ test('normalizeResourceHash test', function(assert) {
     }
   }).data;
 
-  assert.equal(data.callerContext, callerInfo.context);
-  assert.equal(data.callerDescription, callerInfo.description);
-  assert.notOk(data.callerType);
+  assert.equal(data.callerData.callerContext, callerInfo.context);
+  assert.equal(data.callerData.callerDescription, callerInfo.description);
+  assert.notOk(data.callerData.callerType);
 
   // dagInfo.blob test
   data = serializer.normalizeResourceHash({
@@ -189,9 +191,9 @@ test('normalizeResourceHash test', function(assert) {
     }
   }).data;
 
-  assert.equal(data.callerContext, callerInfo.context);
-  assert.equal(data.callerDescription, callerInfo.description);
-  assert.notOk(data.callerType);
+  assert.equal(data.callerData.callerContext, callerInfo.context);
+  assert.equal(data.callerData.callerDescription, callerInfo.description);
+  assert.notOk(data.callerData.callerType);
 
   // dagContext have presidence over dagInfo
   data = serializer.normalizeResourceHash({
@@ -205,7 +207,7 @@ test('normalizeResourceHash test', function(assert) {
     }
   }).data;
 
-  assert.equal(data.callerContext, callerInfo.context);
-  assert.equal(data.callerDescription, callerInfo.description);
-  assert.equal(data.callerType, callerInfo.callerType);
+  assert.equal(data.callerData.callerContext, callerInfo.context);
+  assert.equal(data.callerData.callerDescription, callerInfo.description);
+  assert.equal(data.callerData.callerType, callerInfo.callerType);
 });

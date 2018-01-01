@@ -36,38 +36,38 @@ public class TestCartesianProductCombination {
   private void testCombinationTwoWayVertex0() {
     CartesianProductCombination combination = new CartesianProductCombination(new int[]{2,3}, 0);
 
-    combination.firstTaskWithFixedPartition(1);
+    combination.firstTaskWithFixedChunk(1);
     verifyCombination(combination, new int[]{1,0}, 3);
-    assertTrue(combination.nextTaskWithFixedPartition());
+    assertTrue(combination.nextTaskWithFixedChunk());
     verifyCombination(combination, new int[]{1,1}, 4);
-    assertTrue(combination.nextTaskWithFixedPartition());
+    assertTrue(combination.nextTaskWithFixedChunk());
     verifyCombination(combination, new int[]{1,2}, 5);
-    assertFalse(combination.nextTaskWithFixedPartition());
+    assertFalse(combination.nextTaskWithFixedChunk());
   }
 
   private void testCombinationTwoWayVertex1() {
     CartesianProductCombination combination = new CartesianProductCombination(new int[]{2,3}, 1);
 
-    combination.firstTaskWithFixedPartition(1);
+    combination.firstTaskWithFixedChunk(1);
     verifyCombination(combination, new int[]{0,1}, 1);
-    assertTrue(combination.nextTaskWithFixedPartition());
+    assertTrue(combination.nextTaskWithFixedChunk());
     verifyCombination(combination, new int[]{1,1}, 4);
 
-    assertFalse(combination.nextTaskWithFixedPartition());
+    assertFalse(combination.nextTaskWithFixedChunk());
   }
 
   private void testCombinationThreeWay() {
     CartesianProductCombination combination = new CartesianProductCombination(new int[]{2,2,2}, 1);
 
-    combination.firstTaskWithFixedPartition(1);
+    combination.firstTaskWithFixedChunk(1);
     verifyCombination(combination, new int[]{0,1,0}, 2);
-    assertTrue(combination.nextTaskWithFixedPartition());
+    assertTrue(combination.nextTaskWithFixedChunk());
     verifyCombination(combination, new int[]{0,1,1}, 3);
-    assertTrue(combination.nextTaskWithFixedPartition());
+    assertTrue(combination.nextTaskWithFixedChunk());
     verifyCombination(combination, new int[]{1,1,0}, 6);
-    assertTrue(combination.nextTaskWithFixedPartition());
+    assertTrue(combination.nextTaskWithFixedChunk());
     verifyCombination(combination, new int[]{1,1,1}, 7);
-    assertFalse(combination.nextTaskWithFixedPartition());
+    assertFalse(combination.nextTaskWithFixedChunk());
   }
 
   @Test(timeout = 5000)
@@ -106,5 +106,14 @@ public class TestCartesianProductCombination {
       assertTrue(list.get(0) == i/3);
       assertTrue(list.get(1) == i%3);
     }
+  }
+
+  @Test(timeout = 5000)
+  public void testRejectZero() {
+    int[] numChunk = new int[] {0 ,1};
+    try {
+      new CartesianProductCombination(numChunk);
+      assertTrue(false);
+    } catch (Exception ignored) {}
   }
 }

@@ -28,8 +28,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import com.google.protobuf.ByteString;
 import org.apache.commons.lang.StringUtils;
+import org.apache.tez.dag.app.dag.impl.ImmediateStartVertexManager;
 import org.apache.tez.dag.app.dag.impl.OneToOneEdgeManagerOnDemand;
+import org.apache.tez.dag.app.dag.impl.RootInputVertexManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.apache.hadoop.conf.Configuration;
@@ -65,7 +68,6 @@ import org.apache.tez.dag.api.EdgeProperty.SchedulingType;
 import org.apache.tez.dag.api.client.DAGClient;
 import org.apache.tez.dag.api.client.DAGStatus;
 import org.apache.tez.dag.api.event.VertexStateUpdate;
-import org.apache.tez.dag.app.dag.impl.RootInputVertexManager;
 import org.apache.tez.dag.library.vertexmanager.InputReadyVertexManager;
 import org.apache.tez.runtime.api.AbstractLogicalIOProcessor;
 import org.apache.tez.runtime.api.AbstractLogicalInput;
@@ -125,6 +127,7 @@ public class TestExceptionPropagation {
     Configuration miniTezconf = new Configuration(conf);
     miniTezconf.setInt(YarnConfiguration.RM_AM_MAX_ATTEMPTS, 4);
     miniTezconf.set("fs.defaultFS", remoteFs.getUri().toString()); // use HDFS
+    miniTezconf.setLong(TezConfiguration.TEZ_AM_SLEEP_TIME_BEFORE_EXIT_MILLIS, 500);
     miniTezCluster.init(miniTezconf);
     miniTezCluster.start();
   }
@@ -343,7 +346,8 @@ public class TestExceptionPropagation {
         InputInitializerWithException.getIIDesc(payload);
     v1.addDataSource("input",
         DataSourceDescriptor.create(inputDesc, iiDesc, null));
-    v1.setVertexManagerPlugin(RootInputVertexManagerWithException.getVMDesc(payload));
+    v1.setVertexManagerPlugin(RootInputVertexManagerWithException
+        .getVMDesc(exLocation));
 
     Vertex v2 = 
         Vertex.create("v2", DoNothingProcessor.getProcDesc(), 1);
@@ -671,6 +675,8 @@ public class TestExceptionPropagation {
   public static class RootInputVertexManagerWithException extends RootInputVertexManager {
 
     private ExceptionLocation exLocation;
+    private static final String Test_ExceptionLocation =
+        "Test.ExceptionLocation";
 
     public RootInputVertexManagerWithException(VertexManagerPluginContext context) {
       super(context);
@@ -679,9 +685,15 @@ public class TestExceptionPropagation {
     @Override
     public void initialize() {
       super.initialize();
-      this.exLocation =
-          ExceptionLocation.valueOf(new String(getContext().getUserPayload()
-              .deepCopyAsArray()));
+      Configuration conf;
+      try {
+        conf = TezUtils.createConfFromUserPayload(
+            getContext().getUserPayload());
+        this.exLocation = ExceptionLocation.valueOf(
+            conf.get(Test_ExceptionLocation));
+      } catch (IOException e) {
+        throw new TezUncheckedException(e);
+      }
       if (this.exLocation == ExceptionLocation.VM_INITIALIZE) {
         throw new RuntimeException(this.exLocation.name());
       }
@@ -704,9 +716,22 @@ public class TestExceptionPropagation {
       super.onVertexStarted(completions);
     }
 
-    public static VertexManagerPluginDescriptor getVMDesc(UserPayload payload) {
-      return VertexManagerPluginDescriptor.create(RootInputVertexManagerWithException.class.getName())
-              .setUserPayload(payload);
+    @Override
+    public void onSourceTaskCompleted(TaskAttemptIdentifier attempt) {
+      if (this.exLocation == ExceptionLocation.VM_ON_SOURCETASK_COMPLETED) {
+        throw new RuntimeException(this.exLocation.name());
+      }
+      super.onSourceTaskCompleted(attempt);
+    }
+
+    public static VertexManagerPluginDescriptor getVMDesc(
+        ExceptionLocation exLocation) throws IOException {
+      Configuration conf = new Configuration();
+      conf.set(Test_ExceptionLocation, exLocation.name());
+      UserPayload payload = TezUtils.createUserPayloadFromConf(conf);
+      return VertexManagerPluginDescriptor.create(
+          RootInputVertexManagerWithException.class.getName())
+          .setUserPayload(payload);
     }
   }
 

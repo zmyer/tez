@@ -67,6 +67,7 @@ import org.apache.commons.cli.GnuParser;
 import org.apache.commons.cli.Options;
 import org.apache.commons.lang.exception.ExceptionUtils;
 import org.apache.tez.client.CallerContext;
+import org.apache.tez.client.TezClientUtils;
 import org.apache.tez.common.TezUtils;
 import org.apache.tez.dag.api.NamedEntityDescriptor;
 import org.apache.tez.dag.api.SessionNotRunning;
@@ -268,7 +269,6 @@ public class DAGAppMaster extends AbstractService {
   private HistoryEventHandler historyEventHandler;
   private final Map<String, LocalResource> amResources = new HashMap<String, LocalResource>();
   private final Map<String, LocalResource> cumulativeAdditionalResources = new HashMap<String, LocalResource>();
-  private final int maxAppAttempts;
   private final List<String> diagnostics = new ArrayList<String>();
   private String containerLogs;
 
@@ -346,7 +346,7 @@ public class DAGAppMaster extends AbstractService {
   public DAGAppMaster(ApplicationAttemptId applicationAttemptId,
       ContainerId containerId, String nmHost, int nmPort, int nmHttpPort,
       Clock clock, long appSubmitTime, boolean isSession, String workingDirectory,
-      String [] localDirs, String[] logDirs, String clientVersion, int maxAppAttempts,
+      String [] localDirs, String[] logDirs, String clientVersion,
       Credentials credentials, String jobUserName, AMPluginDescriptorProto pluginDescriptorProto) {
     super(DAGAppMaster.class.getName());
     this.clock = clock;
@@ -365,7 +365,6 @@ public class DAGAppMaster extends AbstractService {
     this.shutdownHandler = createShutdownHandler();
     this.dagVersionInfo = new TezDagVersionInfo();
     this.clientVersion = clientVersion;
-    this.maxAppAttempts = maxAppAttempts;
     this.amCredentials = credentials;
     this.amPluginDescriptorProto = pluginDescriptorProto;
     this.appMasterUgi = UserGroupInformation
@@ -432,6 +431,12 @@ public class DAGAppMaster extends AbstractService {
     initResourceCalculatorPlugins();
     this.hadoopShim = new HadoopShimsLoader(this.amConf).getHadoopShim();
 
+    long sleepTimeBeforeSecs = this.amConf.getLong(
+        TezConfiguration.TEZ_AM_SLEEP_TIME_BEFORE_EXIT_MILLIS,
+        TezConstants.TEZ_DAG_SLEEP_TIME_BEFORE_EXIT);
+    if (sleepTimeBeforeSecs >= 0) {
+      this.shutdownHandler.setSleepTimeBeforeExit(sleepTimeBeforeSecs);
+    }
 
     this.isLocal = conf.getBoolean(TezConfiguration.TEZ_LOCAL_MODE,
         TezConfiguration.TEZ_LOCAL_MODE_DEFAULT);
@@ -455,8 +460,6 @@ public class DAGAppMaster extends AbstractService {
         TezConfiguration.TEZ_AM_DISABLE_CLIENT_VERSION_CHECK,
         TezConfiguration.TEZ_AM_DISABLE_CLIENT_VERSION_CHECK_DEFAULT);
 
-    isLastAMRetry = appAttemptID.getAttemptId() >= maxAppAttempts;
-
     // Check client - AM version compatibility
     LOG.info("Comparing client version with AM version"
         + ", clientVersion=" + clientVersion
@@ -476,16 +479,18 @@ public class DAGAppMaster extends AbstractService {
       }
     }
 
+    dispatcher = createDispatcher();
+
     if (isLocal) {
        conf.setBoolean(TezConfiguration.TEZ_AM_NODE_BLACKLISTING_ENABLED, false);
        conf.set(TezConfiguration.TEZ_HISTORY_LOGGING_SERVICE_CLASS,
            TezConfiguration.TEZ_HISTORY_LOGGING_SERVICE_CLASS_DEFAULT);
+    } else {
+      dispatcher.enableExitOnDispatchException();
     }
-    conf.setBoolean(Dispatcher.DISPATCHER_EXIT_ON_ERROR_KEY, !isLocal);
     String strAppId = this.appAttemptID.getApplicationId().toString();
     this.tezSystemStagingDir = TezCommonUtils.getTezSystemStagingPath(conf, strAppId);
 
-    dispatcher = createDispatcher();
     context = new RunningAppContext(conf);
     this.aclManager = new ACLManager(appMasterUgi.getShortUserName(), this.amConf);
 
@@ -585,13 +590,6 @@ public class DAGAppMaster extends AbstractService {
       addIfServiceDependency(taskSchedulerManager, webUIService);
     }
 
-    if (isLastAMRetry) {
-      LOG.info("AM will unregister as this is the last attempt"
-          + ", currentAttempt=" + appAttemptID.getAttemptId()
-          + ", maxAttempts=" + maxAppAttempts);
-      this.taskSchedulerManager.setShouldUnregisterFlag();
-    }
-
     dispatcher.register(AMSchedulerEventType.class,
         taskSchedulerManager);
     addIfServiceDependency(taskSchedulerManager, clientRpcServer);
@@ -661,7 +659,7 @@ public class DAGAppMaster extends AbstractService {
       List<NamedEntityDescriptor> taskSchedulerDescriptors) {
     return new TaskSchedulerManager(context,
         clientRpcServer, dispatcher.getEventHandler(), containerSignatureMatcher, webUIService,
-        taskSchedulerDescriptors, isLocal);
+        taskSchedulerDescriptors, isLocal, hadoopShim);
   }
 
   @VisibleForTesting
@@ -863,7 +861,7 @@ public class DAGAppMaster extends AbstractService {
       DAGAppMasterEventDagCleanup cleanupEvent = (DAGAppMasterEventDagCleanup) event;
       LOG.info("Cleaning up DAG: name=" + cleanupEvent.getDag().getName() + ", with id=" +
           cleanupEvent.getDag().getID());
-      containerLauncherManager.dagComplete(cleanupEvent.getDag());
+      containerLauncherManager.dagComplete(cleanupEvent.getDag().getID(), jobTokenSecretManager);
       taskCommunicatorManager.dagComplete(cleanupEvent.getDag());
       nodes.dagComplete(cleanupEvent.getDag());
       containers.dagComplete(cleanupEvent.getDag());
@@ -924,6 +922,11 @@ public class DAGAppMaster extends AbstractService {
 
   protected class DAGAppMasterShutdownHandler {
     private AtomicBoolean shutdownHandled = new AtomicBoolean(false);
+    private long sleepTimeBeforeExit = TezConstants.TEZ_DAG_SLEEP_TIME_BEFORE_EXIT;
+
+    void setSleepTimeBeforeExit(long sleepTimeBeforeExit) {
+      this.sleepTimeBeforeExit = sleepTimeBeforeExit;
+    }
 
     public void shutdown() {
       shutdown(false);
@@ -941,16 +944,19 @@ public class DAGAppMaster extends AbstractService {
       }
       LOG.info("Handling DAGAppMaster shutdown");
 
-      AMShutdownRunnable r = new AMShutdownRunnable(now);
+      AMShutdownRunnable r = new AMShutdownRunnable(now, sleepTimeBeforeExit);
       Thread t = new Thread(r, "AMShutdownThread");
       t.start();
     }
 
     private class AMShutdownRunnable implements Runnable {
       private final boolean immediateShutdown;
+      private final long sleepTimeBeforeExit;
 
-      public AMShutdownRunnable(boolean immediateShutdown) {
+      public AMShutdownRunnable(boolean immediateShutdown,
+                                long sleepTimeBeforeExit) {
         this.immediateShutdown = immediateShutdown;
+        this.sleepTimeBeforeExit = sleepTimeBeforeExit;
       }
 
       @Override
@@ -959,8 +965,8 @@ public class DAGAppMaster extends AbstractService {
         // final states. Will be removed once RM come on. TEZ-160.
         if (!immediateShutdown) {
           try {
-            LOG.info("Sleeping for 5 seconds before shutting down");
-            Thread.sleep(TezConstants.TEZ_DAG_SLEEP_TIME_BEFORE_EXIT);
+            LOG.info("Sleeping for {} ms before shutting down", sleepTimeBeforeExit);
+            Thread.sleep(sleepTimeBeforeExit);
           } catch (InterruptedException e) {
             e.printStackTrace();
           }
@@ -1395,7 +1401,7 @@ public class DAGAppMaster extends AbstractService {
       if (LOG.isDebugEnabled()) {
         LOG.debug("Invoked with additional local resources: " + additionalResources);
       }
-      if (dagPlan.getName().startsWith(TezConstants.TEZ_PREWARM_DAG_NAME_PREFIX)) {
+      if (!dagPlan.getName().startsWith(TezConstants.TEZ_PREWARM_DAG_NAME_PREFIX)) {
         submittedDAGs.incrementAndGet();
       }
       startDAG(dagPlan, additionalResources);
@@ -1449,7 +1455,7 @@ public class DAGAppMaster extends AbstractService {
             // The existing file must already be in usercache... let's try to find it.
             Path localFile = findLocalFileForResource(fileName);
             if (localFile != null) {
-              oldSha = RelocalizationUtils.getLocalSha(localFile, conf);
+              oldSha = TezClientUtils.getLocalSha(localFile, conf);
             } else {
               LOG.warn("Couldn't find local file for " + oldLr);
             }
@@ -1457,11 +1463,11 @@ public class DAGAppMaster extends AbstractService {
             LOG.warn("Error getting SHA from local file for " + oldLr, ex);
           }
           if (oldSha == null) { // Well, no dice.
-            oldSha = RelocalizationUtils.getResourceSha(getLocalResourceUri(oldLr), conf);
+            oldSha = TezClientUtils.getResourceSha(getLocalResourceUri(oldLr), conf);
           }
           // Get the new SHA directly from Hadoop stream. If it matches, we already have the
           // file, and if it doesn't we are going to fail; no need to download either way.
-          byte[] newSha = RelocalizationUtils.getResourceSha(getLocalResourceUri(newLr), conf);
+          byte[] newSha = TezClientUtils.getResourceSha(getLocalResourceUri(newLr), conf);
           return Arrays.equals(oldSha, newSha);
         }
       });
@@ -1514,7 +1520,6 @@ public class DAGAppMaster extends AbstractService {
   }
 
   private class RunningAppContext implements AppContext {
-
     private DAG dag;
     private DAGRecoveryData dagRecoveryData;
     private final Configuration conf;
@@ -1523,6 +1528,8 @@ public class DAGAppMaster extends AbstractService {
     private final Lock rLock = rwLock.readLock();
     private final Lock wLock = rwLock.writeLock();
     private final EventHandler eventHandler;
+    private volatile String queueName;
+
     public RunningAppContext(Configuration config) {
       checkNotNull(config, "config is null");
       this.conf = config;
@@ -1778,6 +1785,16 @@ public class DAGAppMaster extends AbstractService {
     @Override
     public DAGRecoveryData getDAGRecoveryData() {
       return dagRecoveryData;
+    }
+
+    @Override
+    public String getQueueName() {
+      return queueName;
+    }
+
+    @Override
+    public void setQueueName(String queueName) {
+      this.queueName = queueName;
     }
   }
 
@@ -2376,14 +2393,6 @@ public class DAGAppMaster extends AbstractService {
         clientVersion = VersionInfo.UNKNOWN;
       }
 
-      // TODO Should this be defaulting to 1. Was there a version of YARN where this was not setup ?
-      int maxAppAttempts = 1;
-      String maxAppAttemptsEnv = System.getenv(
-          ApplicationConstants.MAX_APP_ATTEMPTS_ENV);
-      if (maxAppAttemptsEnv != null) {
-        maxAppAttempts = Integer.parseInt(maxAppAttemptsEnv);
-      }
-
       validateInputParam(appSubmitTimeStr,
           ApplicationConstants.APP_SUBMIT_TIME_ENV);
 
@@ -2430,6 +2439,8 @@ public class DAGAppMaster extends AbstractService {
       UserGroupInformation.setConfiguration(conf);
       Credentials credentials = UserGroupInformation.getCurrentUser().getCredentials();
 
+      TezUtilsInternal.setSecurityUtilConfigration(LOG, conf);
+
       DAGAppMaster appMaster =
           new DAGAppMaster(applicationAttemptId, containerId, nodeHostString,
               Integer.parseInt(nodePortString),
@@ -2438,7 +2449,7 @@ public class DAGAppMaster extends AbstractService {
               System.getenv(Environment.PWD.name()),
               TezCommonUtils.getTrimmedStrings(System.getenv(Environment.LOCAL_DIRS.name())),
               TezCommonUtils.getTrimmedStrings(System.getenv(Environment.LOG_DIRS.name())),
-              clientVersion, maxAppAttempts, credentials, jobUserName, amPluginDescriptorProto);
+              clientVersion, credentials, jobUserName, amPluginDescriptorProto);
       ShutdownHookManager.get().addShutdownHook(
         new DAGAppMasterShutdownHook(appMaster), SHUTDOWN_HOOK_PRIORITY);
 
@@ -2562,7 +2573,7 @@ public class DAGAppMaster extends AbstractService {
     // for an app later
     final DAGSubmittedEvent submittedEvent = new DAGSubmittedEvent(newDAG.getID(),
         submitTime, dagPlan, this.appAttemptID, cumulativeAdditionalResources,
-        newDAG.getUserName(), newDAG.getConf(), containerLogs);
+        newDAG.getUserName(), newDAG.getConf(), containerLogs, getContext().getQueueName());
     boolean dagLoggingEnabled = newDAG.getConf().getBoolean(
         TezConfiguration.TEZ_DAG_HISTORY_LOGGING_ENABLED,
         TezConfiguration.TEZ_DAG_HISTORY_LOGGING_ENABLED_DEFAULT);

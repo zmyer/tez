@@ -29,6 +29,7 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.Random;
 
+import org.junit.Assert;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.apache.hadoop.conf.Configuration;
@@ -171,6 +172,114 @@ public class TestIFile {
 
 
   @Test(timeout = 5000)
+  //test overflow
+  public void testExceedMaxSize() throws IOException {
+    final int oldMaxBufferSize = IFile.Reader.MAX_BUFFER_SIZE;
+
+    Text shortString = new Text("string");
+    Text longString = new Text("A string of length 22.");
+    assertEquals(22, longString.getLength());
+
+    Text readKey = new Text();
+    Text readValue = new Text();
+    DataInputBuffer keyIn = new DataInputBuffer();
+    DataInputBuffer valIn = new DataInputBuffer();
+
+    IFile.Writer writer;
+    IFile.Reader reader;
+    FSDataOutputStream out;
+
+    // Check Key length exceeding MAX_BUFFER_SIZE
+    out = localFs.create(outputPath);
+    writer = new IFile.Writer(defaultConf, out,
+            Text.class, Text.class, null, null, null, false);
+    writer.append(longString, shortString);
+    writer.close();
+
+    out.close();
+
+    // Set this to a smaller value for testing
+    IFile.Reader.MAX_BUFFER_SIZE = 16;
+
+    reader = new IFile.Reader(localFs, outputPath,
+            null, null, null, false, 0, -1);
+
+    try {
+      reader.nextRawKey(keyIn);
+      Assert.fail("Expected IllegalArgumentException to be thrown");
+    } catch (IllegalArgumentException e) {
+      // test passed
+    }
+    reader.close();
+
+    // Check Value length exceeding MAX_BUFFER_SIZE
+    out = localFs.create(outputPath);
+    writer = new IFile.Writer(defaultConf, out,
+            Text.class, Text.class, null, null, null, false);
+    writer.append(shortString, longString);
+    writer.close();
+
+    out.close();
+
+    // Set this to a smaller value for testing
+    IFile.Reader.MAX_BUFFER_SIZE = 16;
+
+    reader = new IFile.Reader(localFs, outputPath,
+            null, null, null, false, 0, -1);
+
+    try {
+      reader.nextRawKey(keyIn);
+      reader.nextRawValue(valIn);
+      Assert.fail("Expected IllegalArgumentException to be thrown");
+    } catch (IllegalArgumentException e) {
+      // test passed
+    }
+    reader.close();
+
+    // Check Key length not getting doubled
+    out = localFs.create(outputPath);
+    writer = new IFile.Writer(defaultConf, out,
+            Text.class, Text.class, null, null, null, false);
+    writer.append(longString, shortString);
+    writer.close();
+
+    out.close();
+
+    // Set this to a smaller value for testing
+    IFile.Reader.MAX_BUFFER_SIZE = 32;
+
+    reader = new IFile.Reader(localFs, outputPath,
+            null, null, null, false, 0, -1);
+
+    reader.nextRawKey(keyIn);
+    assertEquals(longString.getLength() + 1, keyIn.getData().length);
+    reader.close();
+
+    // Check Value length not getting doubled
+    out = localFs.create(outputPath);
+    writer = new IFile.Writer(defaultConf, out,
+            Text.class, Text.class, null, null, null, false);
+    writer.append(shortString, longString);
+    writer.close();
+
+    out.close();
+
+    // Set this to a smaller value for testing
+    IFile.Reader.MAX_BUFFER_SIZE = 32;
+
+    reader = new IFile.Reader(localFs, outputPath,
+            null, null, null, false, 0, -1);
+
+    reader.nextRawKey(keyIn);
+    reader.nextRawValue(valIn);
+    assertEquals(longString.getLength() + 1, valIn.getData().length);
+    reader.close();
+
+    // revert back to original value
+    IFile.Reader.MAX_BUFFER_SIZE = oldMaxBufferSize;
+  }
+
+  @Test(timeout = 5000)
   //test with sorted data and repeat keys
   public void testWithRLEMarker() throws IOException {
     //Test with append(Object, Object)
@@ -204,6 +313,9 @@ public class TestIFile {
     writer = new IFile.Writer(defaultConf, out,
         Text.class, IntWritable.class, codec, null, null, true);
 
+    BoundedByteArrayOutputStream boundedOut = new BoundedByteArrayOutputStream(1024*1024);
+    Writer inMemWriter = new InMemoryWriter(boundedOut, true);
+
     DataInputBuffer kin = new DataInputBuffer();
     kin.reset(kvbuffer, pos, keyLength);
 
@@ -215,6 +327,8 @@ public class TestIFile {
     //Write initial KV pair
     writer.append(kin, vin);
     assertFalse(writer.sameKey);
+    inMemWriter.append(kin, vin);
+    assertFalse(inMemWriter.sameKey);
     pos += (keyLength + valueLength);
 
     //Second key is similar to key1 (RLE should kick in)
@@ -223,6 +337,8 @@ public class TestIFile {
     vin.reset(vout.getData(), vout.getLength());
     writer.append(kin, vin);
     assertTrue(writer.sameKey);
+    inMemWriter.append(kin, vin);
+    assertTrue(inMemWriter.sameKey);
     pos += (keyLength + valueLength);
 
     //Next key (key3) is different (RLE should not kick in)
@@ -231,9 +347,13 @@ public class TestIFile {
     vin.reset(vout.getData(), vout.getLength());
     writer.append(kin, vin);
     assertFalse(writer.sameKey);
+    inMemWriter.append(kin, vin);
+    assertFalse(inMemWriter.sameKey);
 
     writer.close();
     out.close();
+    inMemWriter.close();
+    boundedOut.close();
   }
 
   @Test(timeout = 5000)
@@ -307,25 +427,25 @@ public class TestIFile {
 
     //No RLE, No RepeatKeys, no compression
     writer = new InMemoryWriter(bout);
-    writeTestFileUsingDataBuffer(writer, false, false, data, null);
+    writeTestFileUsingDataBuffer(writer, false, data);
     readUsingInMemoryReader(bout.getBuffer(), data);
 
     //No RLE, RepeatKeys, no compression
     bout.reset();
     writer = new InMemoryWriter(bout);
-    writeTestFileUsingDataBuffer(writer, false, true, data, null);
+    writeTestFileUsingDataBuffer(writer, true, data);
     readUsingInMemoryReader(bout.getBuffer(), data);
 
     //RLE, No RepeatKeys, no compression
     bout.reset();
-    writer = new InMemoryWriter(bout);
-    writeTestFileUsingDataBuffer(writer, true, false, data, null);
+    writer = new InMemoryWriter(bout, true);
+    writeTestFileUsingDataBuffer(writer, false, data);
     readUsingInMemoryReader(bout.getBuffer(), data);
 
     //RLE, RepeatKeys, no compression
     bout.reset();
-    writer = new InMemoryWriter(bout);
-    writeTestFileUsingDataBuffer(writer, true, true, data, null);
+    writer = new InMemoryWriter(bout, true);
+    writeTestFileUsingDataBuffer(writer, true, data);
     readUsingInMemoryReader(bout.getBuffer(), data);
   }
 
@@ -644,13 +764,13 @@ public class TestIFile {
     FSDataOutputStream out = localFs.create(outputPath);
     IFile.Writer writer = new IFile.Writer(defaultConf, out,
         Text.class, IntWritable.class, codec, null, null, rle);
-    writeTestFile(writer, rle, repeatKeys, data, codec);
+    writeTestFile(writer, repeatKeys, data);
     out.close();
     return  writer;
   }
 
-  private Writer writeTestFile(IFile.Writer writer, boolean rle, boolean repeatKeys,
-      List<KVPair> data, CompressionCodec codec) throws IOException {
+  private Writer writeTestFile(IFile.Writer writer, boolean repeatKeys,
+      List<KVPair> data) throws IOException {
     assertNotNull(writer);
 
     Text previousKey = null;
@@ -677,13 +797,13 @@ public class TestIFile {
     FSDataOutputStream out = localFs.create(outputPath);
     IFile.Writer writer = new IFile.Writer(defaultConf, out,
         Text.class, IntWritable.class, codec, null, null, rle);
-    writeTestFileUsingDataBuffer(writer, rle, repeatKeys, data, codec);
+    writeTestFileUsingDataBuffer(writer, repeatKeys, data);
     out.close();
     return writer;
   }
 
-  private Writer writeTestFileUsingDataBuffer(IFile.Writer writer, boolean rle, boolean repeatKeys,
-      List<KVPair> data, CompressionCodec codec) throws IOException {
+  private Writer writeTestFileUsingDataBuffer(Writer writer, boolean repeatKeys,
+      List<KVPair> data) throws IOException {
     DataInputBuffer previousKey = new DataInputBuffer();
     DataInputBuffer key = new DataInputBuffer();
     DataInputBuffer value = new DataInputBuffer();

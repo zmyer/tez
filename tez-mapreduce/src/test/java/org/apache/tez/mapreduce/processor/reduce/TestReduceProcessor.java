@@ -26,6 +26,7 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 
+import org.apache.tez.dag.api.TezConfiguration;
 import org.apache.tez.hadoop.shim.DefaultHadoopShim;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -43,6 +44,7 @@ import org.apache.hadoop.yarn.util.AuxiliaryServiceHelper;
 import org.apache.tez.common.MRFrameworkConfigs;
 import org.apache.tez.common.TezUtils;
 import org.apache.tez.common.TezRuntimeFrameworkConfigs;
+import org.apache.tez.common.TezSharedExecutor;
 import org.apache.tez.common.security.JobTokenIdentifier;
 import org.apache.tez.common.security.JobTokenSecretManager;
 import org.apache.tez.dag.api.InputDescriptor;
@@ -155,10 +157,11 @@ public class TestReduceProcessor {
 
     TestUmbilical testUmbilical = new TestUmbilical();
 
+    TezSharedExecutor sharedExecutor = new TezSharedExecutor(jobConf);
     LogicalIOProcessorRuntimeTask mapTask = MapUtils.createLogicalTask(localFs, workDir, jobConf, 0,
         mapInput, testUmbilical, dagName, mapVertexName,
         Collections.singletonList(mapInputSpec),
-        Collections.singletonList(mapOutputSpec));
+        Collections.singletonList(mapOutputSpec), sharedExecutor);
 
     mapTask.initialize();
     mapTask.run();
@@ -208,12 +211,14 @@ public class TestReduceProcessor {
         Collections.singletonList(reduceOutputSpec), null, null);
 
     Map<String, ByteBuffer> serviceConsumerMetadata = new HashMap<String, ByteBuffer>();
-    serviceConsumerMetadata.put(ShuffleUtils.SHUFFLE_HANDLER_SERVICE_ID,
+    String auxiliaryService = jobConf.get(TezConfiguration.TEZ_AM_SHUFFLE_AUXILIARY_SERVICE_ID,
+        TezConfiguration.TEZ_AM_SHUFFLE_AUXILIARY_SERVICE_ID_DEFAULT);
+    serviceConsumerMetadata.put(auxiliaryService,
         ShuffleUtils.convertJobTokenToBytes(shuffleToken));
     Map<String, String> serviceProviderEnvMap = new HashMap<String, String>();
     ByteBuffer shufflePortBb = ByteBuffer.allocate(4).putInt(0, 8000);
     AuxiliaryServiceHelper
-        .setServiceDataIntoEnv(ShuffleUtils.SHUFFLE_HANDLER_SERVICE_ID, shufflePortBb,
+        .setServiceDataIntoEnv(auxiliaryService, shufflePortBb,
             serviceProviderEnvMap);
 
     LogicalIOProcessorRuntimeTask task = new LogicalIOProcessorRuntimeTask(
@@ -225,7 +230,7 @@ public class TestReduceProcessor {
         serviceConsumerMetadata,
         serviceProviderEnvMap,
         HashMultimap.<String, String>create(), null, "", new ExecutionContextImpl("localhost"),
-        Runtime.getRuntime().maxMemory(), true, new DefaultHadoopShim());
+        Runtime.getRuntime().maxMemory(), true, new DefaultHadoopShim(), sharedExecutor);
 
     List<Event> destEvents = new LinkedList<Event>();
     destEvents.add(dme);
@@ -235,6 +240,7 @@ public class TestReduceProcessor {
     sortedOut.handleEvents(destEvents);
     task.run();
     task.close();
+    sharedExecutor.shutdownNow();
 
     // MRTask mrTask = (MRTask)t.getProcessor();
     // TODO NEWTEZ Verify the partitioner has not been created

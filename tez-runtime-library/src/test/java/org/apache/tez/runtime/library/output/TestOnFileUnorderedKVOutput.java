@@ -41,6 +41,7 @@ import java.util.Map;
 import com.google.protobuf.ByteString;
 
 import org.apache.commons.lang.RandomStringUtils;
+import org.apache.tez.dag.api.TezConfiguration;
 import org.apache.tez.hadoop.shim.DefaultHadoopShim;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -50,6 +51,7 @@ import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.IntWritable;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.yarn.util.AuxiliaryServiceHelper;
+import org.apache.tez.common.TezSharedExecutor;
 import org.apache.tez.common.TezUtils;
 import org.apache.tez.dag.api.OutputDescriptor;
 import org.apache.tez.dag.api.UserPayload;
@@ -125,7 +127,8 @@ public class TestOnFileUnorderedKVOutput {
     conf.set(TezRuntimeConfiguration.TEZ_RUNTIME_KEY_CLASS, Text.class.getName());
     conf.set(TezRuntimeConfiguration.TEZ_RUNTIME_VALUE_CLASS, IntWritable.class.getName());
 
-    OutputContext outputContext = createOutputContext(conf);
+    TezSharedExecutor sharedExecutor = new TezSharedExecutor(conf);
+    OutputContext outputContext = createOutputContext(conf, sharedExecutor);
 
     UnorderedKVOutput kvOutput = new UnorderedKVOutput(outputContext, 1);
 
@@ -155,6 +158,7 @@ public class TestOnFileUnorderedKVOutput {
     assertEquals(outputContext.getUniqueIdentifier(), shufflePayload.getPathComponent());
     assertEquals(shufflePort, shufflePayload.getPort());
     assertEquals("localhost", shufflePayload.getHost());
+    sharedExecutor.shutdownNow();
   }
 
   @Test(timeout = 30000)
@@ -164,10 +168,12 @@ public class TestOnFileUnorderedKVOutput {
     conf.set(TezRuntimeConfiguration.TEZ_RUNTIME_KEY_CLASS, Text.class.getName());
     conf.set(TezRuntimeConfiguration.TEZ_RUNTIME_VALUE_CLASS, IntWritable.class.getName());
     conf.setBoolean(TezRuntimeConfiguration.TEZ_RUNTIME_PIPELINED_SHUFFLE_ENABLED, true);
+    conf.setBoolean(TezRuntimeConfiguration.TEZ_RUNTIME_ENABLE_FINAL_MERGE_IN_OUTPUT, false);
 
     conf.setInt(TezRuntimeConfiguration.TEZ_RUNTIME_UNORDERED_OUTPUT_BUFFER_SIZE_MB, 1);
 
-    OutputContext outputContext = createOutputContext(conf);
+    TezSharedExecutor sharedExecutor = new TezSharedExecutor(conf);
+    OutputContext outputContext = createOutputContext(conf, sharedExecutor);
 
     UnorderedKVOutput kvOutput = new UnorderedKVOutput(outputContext, 1);
 
@@ -202,9 +208,11 @@ public class TestOnFileUnorderedKVOutput {
     assertFalse(shufflePayload.hasEmptyPartitions());
     assertEquals(shufflePort, shufflePayload.getPort());
     assertEquals("localhost", shufflePayload.getHost());
+    sharedExecutor.shutdownNow();
   }
 
-  private OutputContext createOutputContext(Configuration conf) throws IOException {
+  private OutputContext createOutputContext(Configuration conf, TezSharedExecutor sharedExecutor)
+      throws IOException {
     int appAttemptNumber = 1;
     TezUmbilical tezUmbilical = mock(TezUmbilical.class);
     String dagName = "currentDAG";
@@ -219,18 +227,18 @@ public class TestOnFileUnorderedKVOutput {
     TaskSpec mockSpec = mock(TaskSpec.class);
     when(mockSpec.getInputs()).thenReturn(Collections.singletonList(mock(InputSpec.class)));
     when(mockSpec.getOutputs()).thenReturn(Collections.singletonList(mock(OutputSpec.class)));
-    task = new LogicalIOProcessorRuntimeTask(
-        mockSpec, appAttemptNumber, 
-        new Configuration(), new String[]{"/"},
-        tezUmbilical, null, null, null, null, "", null, 1024, false, new DefaultHadoopShim());
-    
+    task = new LogicalIOProcessorRuntimeTask(mockSpec, appAttemptNumber, new Configuration(),
+        new String[]{"/"}, tezUmbilical, null, null, null, null, "", null, 1024, false,
+        new DefaultHadoopShim(), sharedExecutor);
+
     LogicalIOProcessorRuntimeTask runtimeTask = spy(task);
     
     Map<String, String> auxEnv = new HashMap<String, String>();
     ByteBuffer bb = ByteBuffer.allocate(4);
     bb.putInt(shufflePort);
     bb.position(0);
-    AuxiliaryServiceHelper.setServiceDataIntoEnv(ShuffleUtils.SHUFFLE_HANDLER_SERVICE_ID, bb, auxEnv);
+    AuxiliaryServiceHelper.setServiceDataIntoEnv(conf.get(TezConfiguration.TEZ_AM_SHUFFLE_AUXILIARY_SERVICE_ID,
+        TezConfiguration.TEZ_AM_SHUFFLE_AUXILIARY_SERVICE_ID_DEFAULT), bb, auxEnv);
 
 
     OutputDescriptor outputDescriptor = mock(OutputDescriptor.class);
@@ -240,7 +248,7 @@ public class TestOnFileUnorderedKVOutput {
         appAttemptNumber, tezUmbilical, dagName, taskVertexName, destinationVertexName,
         -1, taskAttemptID, 0, userPayload, runtimeTask,
         null, auxEnv, new MemoryDistributor(1, 1, conf) , outputDescriptor, null,
-        new ExecutionContextImpl("localhost"), 2048);
+        new ExecutionContextImpl("localhost"), 2048, new TezSharedExecutor(defaultConf));
     verify(runtimeTask, times(1)).addAndGetTezCounter(destinationVertexName);
     verify(runtimeTask, times(1)).getTaskStatistics();
     // verify output stats object got created

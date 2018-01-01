@@ -117,7 +117,7 @@
   </Match>
 
   <Match>
-    <Class name="org.apache.tez.runtime.library.common.shuffle.ShuffleUtils"/>
+    <Class name="org.apache.tez.runtime.library.common.TezRuntimeUtils"/>
     <Method name="getHttpConnectionParams" params="org.apache.hadoop.conf.Configuration" return="org.apache.tez.http.HttpConnectionParams"/>
     <Bug pattern="DC_PARTIALLY_CONSTRUCTED"/>
   </Match>
@@ -200,5 +200,17 @@
     <Class name="org.apache.tez.dag.library.vertexmanager.FairShuffleUserPayloads$RangeProto$Builder"/>
     <Method name="maybeForceBuilderInitialization"/>
     <Bug pattern="UCF_USELESS_CONTROL_FLOW"/>
+  </Match>
+
+  <Match>
+    <Class name="org.apache.tez.runtime.library.common.sort.impl.IFile$Reader"/>
+    <Field name="MAX_BUFFER_SIZE"/>
+    <Bug pattern="MS_SHOULD_BE_FINAL"/>
+  </Match>
+
+  <Match>
+    <Class name="org.apache.tez.runtime.library.common.shuffle.MemoryFetchedInput"/>
+    <Method name="getBytes"/>
+    <Bug pattern="EI_EXPOSE_REP"/>
   </Match>
 </FindBugsFilter>

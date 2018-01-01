@@ -18,6 +18,8 @@
 
 package org.apache.tez.runtime.library.common.sort.impl.dflt;
 
+import org.junit.Assert;
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 import static org.mockito.Matchers.any;
@@ -31,6 +33,8 @@ import static org.mockito.internal.verification.VerificationModeFactory.times;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.BitSet;
 import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
 
@@ -49,6 +53,9 @@ import org.apache.tez.common.TezUtils;
 import org.apache.tez.common.counters.TaskCounter;
 import org.apache.tez.common.counters.TezCounter;
 import org.apache.tez.common.counters.TezCounters;
+import org.apache.tez.common.TezCommonUtils;
+import org.apache.tez.common.TezUtilsInternal;
+import org.apache.tez.dag.api.TezConfiguration;
 import org.apache.tez.dag.api.UserPayload;
 import org.apache.tez.runtime.api.Event;
 import org.apache.tez.runtime.api.ExecutionContext;
@@ -61,6 +68,8 @@ import org.apache.tez.runtime.library.api.TezRuntimeConfiguration;
 import org.apache.tez.runtime.library.common.MemoryUpdateCallbackHandler;
 import org.apache.tez.runtime.library.common.shuffle.ShuffleUtils;
 import org.apache.tez.runtime.library.common.sort.impl.ExternalSorter;
+import org.apache.tez.runtime.library.common.sort.impl.TezIndexRecord;
+import org.apache.tez.runtime.library.common.sort.impl.TezSpillRecord;
 import org.apache.tez.runtime.library.conf.OrderedPartitionedKVOutputConfig.SorterImpl;
 import org.apache.tez.runtime.library.partitioner.HashPartitioner;
 import org.apache.tez.runtime.library.shuffle.impl.ShuffleUserPayloads;
@@ -266,6 +275,56 @@ public class TestDefaultSorter {
   }
 
   @Test(timeout = 30000)
+  public void testEmptyCaseFileLengths() throws IOException {
+    testEmptyCaseFileLengthsHelper(50, 2, 1, 48);
+    testEmptyCaseFileLengthsHelper(1, 1, 10, 0);
+  }
+
+  public void testEmptyCaseFileLengthsHelper(int numPartitions, int numKeys, int keyLen, int expectedEmptyPartitions)
+      throws IOException {
+    OutputContext context = createTezOutputContext();
+
+    MemoryUpdateCallbackHandler handler = new MemoryUpdateCallbackHandler();
+    conf.setInt(TezRuntimeConfiguration.TEZ_RUNTIME_IO_SORT_MB, 1);
+    context.requestInitialMemory(ExternalSorter.getInitialMemoryRequirement(conf,
+        context.getTotalMemoryAvailableToTask()), handler);
+    String auxService = conf.get(TezConfiguration.TEZ_AM_SHUFFLE_AUXILIARY_SERVICE_ID, TezConfiguration.TEZ_AM_SHUFFLE_AUXILIARY_SERVICE_ID_DEFAULT);
+    DefaultSorter sorter = new DefaultSorter(context, conf, numPartitions, handler.getMemoryAssigned());
+    try {
+      writeData(sorter, numKeys, keyLen);
+      List<Event> events = new ArrayList<Event>();
+      String pathComponent = (context.getUniqueIdentifier() + "_" + 0);
+      ShuffleUtils.generateEventOnSpill(events, true, true, context, 0,
+          sorter.indexCacheList.get(0), 0, true, pathComponent, sorter.getPartitionStats(),
+          sorter.reportDetailedPartitionStats(), auxService, TezCommonUtils.newBestCompressionDeflater());
+
+      CompositeDataMovementEvent compositeDataMovementEvent =
+          (CompositeDataMovementEvent) events.get(1);
+      ByteBuffer bb = compositeDataMovementEvent.getUserPayload();
+      ShuffleUserPayloads.DataMovementEventPayloadProto shufflePayload =
+          ShuffleUserPayloads.DataMovementEventPayloadProto.parseFrom(ByteString.copyFrom(bb));
+
+      if (shufflePayload.hasEmptyPartitions()) {
+        byte[] emptyPartitionsBytesString =
+            TezCommonUtils.decompressByteStringToByteArray(
+                shufflePayload.getEmptyPartitions());
+        BitSet emptyPartitionBitSet = TezUtilsInternal.fromByteArray(emptyPartitionsBytesString);
+        Assert.assertTrue("Number of empty partitions did not match!",
+            emptyPartitionBitSet.cardinality() == expectedEmptyPartitions);
+      } else {
+        Assert.assertTrue(expectedEmptyPartitions == 0);
+      }
+      //4 bytes of header + numKeys* 2 *(keydata.length + keyLength.length) + 2 * 1 byte of EOF_MARKER + 4 bytes of checksum
+      assertEquals("Unexpected Output File Size!",
+          localFs.getFileStatus(sorter.getFinalOutputFile()).getLen(), numKeys * (4 + (2 * (2 + keyLen)) + 2 + 4));
+      assertTrue(sorter.getNumSpills()  == 1);
+      verifyCounters(sorter, context);
+    } catch(IOException ioe) {
+      fail(ioe.getMessage());
+    }
+  }
+
+  @Test
   public void testWithEmptyData() throws IOException {
     OutputContext context = createTezOutputContext();
 
@@ -279,6 +338,7 @@ public class TestDefaultSorter {
     try {
       sorter.flush();
       sorter.close();
+      assertTrue(sorter.isClosed());
       assertTrue(sorter.getFinalOutputFile().getParent().getName().equalsIgnoreCase(UniqueID));
       verifyCounters(sorter, context);
     } catch(Exception e) {
@@ -301,11 +361,69 @@ public class TestDefaultSorter {
     try {
       sorter.flush();
       sorter.close();
+      assertTrue(sorter.isClosed());
       assertTrue(sorter.getFinalOutputFile().getParent().getName().equalsIgnoreCase(UniqueID +
           "_0"));
       verifyCounters(sorter, context);
     } catch(Exception e) {
       fail();
+    }
+  }
+
+  @Test
+  public void testEmptyPartitions() throws Exception {
+    testEmptyPartitionsHelper(2, false);
+    testEmptyPartitionsHelper(2, true);
+    testEmptyPartitionsHelper(0, true);
+    testEmptyPartitionsHelper(0, true);
+  }
+
+  public void testEmptyPartitionsHelper(int numKeys, boolean sendEmptyPartitionDetails) throws IOException {
+    OutputContext context = createTezOutputContext();
+    conf.setBoolean(TezRuntimeConfiguration.TEZ_RUNTIME_EMPTY_PARTITION_INFO_VIA_EVENTS_ENABLED, sendEmptyPartitionDetails);
+    conf.setBoolean(TezRuntimeConfiguration.TEZ_RUNTIME_ENABLE_FINAL_MERGE_IN_OUTPUT, true);
+    conf.setLong(TezRuntimeConfiguration.TEZ_RUNTIME_IO_SORT_MB, 1);
+    MemoryUpdateCallbackHandler handler = new MemoryUpdateCallbackHandler();
+    context.requestInitialMemory(ExternalSorter.getInitialMemoryRequirement(conf,
+        context.getTotalMemoryAvailableToTask()), handler);
+    int partitions = 50;
+    DefaultSorter sorter = new DefaultSorter(context, conf, partitions, handler.getMemoryAssigned());
+
+    writeData(sorter, numKeys, 1000000);
+    if (numKeys == 0) {
+      assertTrue(sorter.getNumSpills() == 1);
+    } else {
+      assertTrue(sorter.getNumSpills() == numKeys);
+    }
+    verifyCounters(sorter, context);
+    if (sorter.indexCacheList.size() != 0) {
+      for (int i = 0; i < sorter.getNumSpills(); i++) {
+        TezSpillRecord record = sorter.indexCacheList.get(i);
+        for (int j = 0; j < partitions; j++) {
+          TezIndexRecord tezIndexRecord = record.getIndex(j);
+          if (tezIndexRecord.hasData()) {
+            continue;
+          }
+          if (sendEmptyPartitionDetails) {
+            Assert.assertEquals("Unexpected raw length for " + i + "th partition", 0, tezIndexRecord.getRawLength());
+          } else {
+            Assert.assertEquals("", tezIndexRecord.getRawLength(), 6);
+          }
+        }
+      }
+    }
+    Path indexFile = sorter.getFinalIndexFile();
+    TezSpillRecord spillRecord = new TezSpillRecord(indexFile, conf);
+    for (int i = 0; i < partitions; i++) {
+      TezIndexRecord tezIndexRecord = spillRecord.getIndex(i);
+      if (tezIndexRecord.hasData()) {
+        continue;
+      }
+      if (sendEmptyPartitionDetails) {
+        Assert.assertEquals("Unexpected raw length for " + i + "th partition", 0, tezIndexRecord.getRawLength());
+      } else {
+        Assert.assertEquals("Unexpected raw length for " + i + "th partition", 6, tezIndexRecord.getRawLength());
+      }
     }
   }
 
@@ -425,11 +543,11 @@ public class TestDefaultSorter {
     }
 
     TezCounter finalOutputBytes = context.getCounters().findCounter(TaskCounter.OUTPUT_BYTES_PHYSICAL);
-    assertTrue(finalOutputBytes.getValue() > 0);
+    assertTrue(finalOutputBytes.getValue() >= 0);
 
     TezCounter outputBytesWithOverheadCounter = context.getCounters().findCounter
         (TaskCounter.OUTPUT_BYTES_WITH_OVERHEAD);
-    assertTrue(outputBytesWithOverheadCounter.getValue() > 0);
+    assertTrue(outputBytesWithOverheadCounter.getValue() >= 0);
     verify(context, atLeastOnce()).notifyProgress();
   }
 
@@ -463,7 +581,8 @@ public class TestDefaultSorter {
     doReturn("v1").when(context).getDestinationVertexName();
     doReturn(ByteBuffer.wrap(serviceProviderMetaData.getData())).when(context)
         .getServiceProviderMetaData
-            (ShuffleUtils.SHUFFLE_HANDLER_SERVICE_ID);
+            (conf.get(TezConfiguration.TEZ_AM_SHUFFLE_AUXILIARY_SERVICE_ID,
+                TezConfiguration.TEZ_AM_SHUFFLE_AUXILIARY_SERVICE_ID_DEFAULT));
     doAnswer(new Answer() {
       @Override public Object answer(InvocationOnMock invocation) throws Throwable {
         long requestedSize = (Long) invocation.getArguments()[0];

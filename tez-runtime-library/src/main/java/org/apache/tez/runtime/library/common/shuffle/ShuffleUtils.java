@@ -29,6 +29,7 @@ import java.text.DecimalFormat;
 import java.util.BitSet;
 import java.util.Collection;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.zip.Deflater;
 
 import javax.annotation.Nullable;
@@ -40,13 +41,13 @@ import com.google.protobuf.ByteString;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.io.DataOutputBuffer;
+import org.apache.tez.dag.api.TezConfiguration;
 import org.apache.tez.http.BaseHttpConnection;
-import org.apache.tez.http.HttpConnection;
 import org.apache.tez.http.HttpConnectionParams;
-import org.apache.tez.http.SSLFactory;
-import org.apache.tez.http.async.netty.AsyncHttpConnection;
 import org.apache.tez.runtime.api.events.DataMovementEvent;
+import org.apache.tez.runtime.library.common.TezRuntimeUtils;
 import org.apache.tez.runtime.library.utils.DATA_RANGE_IN_MB;
+import org.apache.tez.util.FastNumberFormat;
 import org.roaringbitmap.RoaringBitmap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -62,7 +63,6 @@ import org.apache.tez.runtime.api.Event;
 import org.apache.tez.runtime.api.OutputContext;
 import org.apache.tez.runtime.api.events.CompositeDataMovementEvent;
 import org.apache.tez.runtime.api.events.VertexManagerEvent;
-import org.apache.tez.runtime.library.api.TezRuntimeConfiguration;
 import org.apache.tez.runtime.library.common.InputAttemptIdentifier;
 import org.apache.tez.runtime.library.common.sort.impl.IFile;
 import org.apache.tez.runtime.library.common.sort.impl.TezIndexRecord;
@@ -74,17 +74,22 @@ import org.apache.tez.runtime.library.shuffle.impl.ShuffleUserPayloads.DetailedP
 public class ShuffleUtils {
 
   private static final Logger LOG = LoggerFactory.getLogger(ShuffleUtils.class);
-  public static final String SHUFFLE_HANDLER_SERVICE_ID = "mapreduce_shuffle";
   private static final long MB = 1024l * 1024l;
-
-  //Shared by multiple threads
-  private static volatile SSLFactory sslFactory;
 
   static final ThreadLocal<DecimalFormat> MBPS_FORMAT =
       new ThreadLocal<DecimalFormat>() {
         @Override
         protected DecimalFormat initialValue() {
           return new DecimalFormat("0.00");
+        }
+      };
+  static final ThreadLocal<FastNumberFormat> MBPS_FAST_FORMAT =
+      new ThreadLocal<FastNumberFormat>() {
+        @Override
+        protected FastNumberFormat initialValue() {
+          FastNumberFormat fmt = FastNumberFormat.getInstance();
+          fmt.setMinimumIntegerDigits(2);
+          return fmt;
         }
       };
 
@@ -105,20 +110,13 @@ public class ShuffleUtils {
 
   public static int deserializeShuffleProviderMetaData(ByteBuffer meta)
       throws IOException {
-    DataInputByteBuffer in = new DataInputByteBuffer();
-    try {
-      in.reset(meta);
-      int port = in.readInt();
-      return port;
-    } finally {
-      in.close();
-    }
+    return TezRuntimeUtils.deserializeShuffleProviderMetaData(meta);
   }
 
   public static void shuffleToMemory(byte[] shuffleData,
       InputStream input, int decompressedLength, int compressedLength,
       CompressionCodec codec, boolean ifileReadAhead, int ifileReadAheadLength,
-      Logger LOG, String identifier) throws IOException {
+      Logger LOG, InputAttemptIdentifier identifier) throws IOException {
     try {
       IFile.Reader.readToMemory(shuffleData, input, compressedLength, codec,
           ifileReadAhead, ifileReadAheadLength);
@@ -144,7 +142,7 @@ public class ShuffleUtils {
   }
   
   public static void shuffleToDisk(OutputStream output, String hostIdentifier,
-      InputStream input, long compressedLength, long decompressedLength, Logger LOG, String identifier,
+      InputStream input, long compressedLength, long decompressedLength, Logger LOG, InputAttemptIdentifier identifier,
       boolean ifileReadAhead, int ifileReadAheadLength, boolean verifyChecksum) throws IOException {
     // Copy data to local-disk
     long bytesLeft = compressedLength;
@@ -206,7 +204,7 @@ public class ShuffleUtils {
   }
 
   public static StringBuilder constructBaseURIForShuffleHandler(String host,
-      int port, int partition, String appId, int dagIdentifier, boolean sslShuffle) {
+      int port, int partition, int partitionCount, String appId, int dagIdentifier, boolean sslShuffle) {
     final String http_protocol = (sslShuffle) ? "https://" : "http://";
     StringBuilder sb = new StringBuilder(http_protocol);
     sb.append(host);
@@ -219,6 +217,10 @@ public class ShuffleUtils {
     sb.append(String.valueOf(dagIdentifier));
     sb.append("&reduce=");
     sb.append(String.valueOf(partition));
+    if (partitionCount > 1) {
+      sb.append("-");
+      sb.append(String.valueOf(partition + partitionCount - 1));
+    }
     sb.append("&map=");
     return sb;
   }
@@ -246,12 +248,7 @@ public class ShuffleUtils {
   public static BaseHttpConnection getHttpConnection(boolean asyncHttp, URL url,
       HttpConnectionParams params, String logIdentifier, JobTokenSecretManager jobTokenSecretManager)
       throws IOException {
-    if (asyncHttp) {
-      //TODO: support other async packages? httpclient-async?
-      return new AsyncHttpConnection(url, params, logIdentifier, jobTokenSecretManager);
-    } else {
-      return new HttpConnection(url, params, logIdentifier, jobTokenSecretManager);
-    }
+    return TezRuntimeUtils.getHttpConnection(asyncHttp, url, params, logIdentifier, jobTokenSecretManager);
   }
 
   public static String stringify(DataMovementEventPayloadProto dmProto) {
@@ -279,13 +276,14 @@ public class ShuffleUtils {
    * @param finalMergeEnabled
    * @param isLastEvent
    * @param pathComponent
+   * @param auxiliaryService
    * @param deflater
    * @return ByteBuffer
    * @throws IOException
    */
   static ByteBuffer generateDMEPayload(boolean sendEmptyPartitionDetails,
       int numPhysicalOutputs, TezSpillRecord spillRecord, OutputContext context,
-      int spillId, boolean finalMergeEnabled, boolean isLastEvent, String pathComponent, Deflater deflater)
+      int spillId, boolean finalMergeEnabled, boolean isLastEvent, String pathComponent, String auxiliaryService, Deflater deflater)
       throws IOException {
     DataMovementEventPayloadProto.Builder payloadBuilder = DataMovementEventPayloadProto
         .newBuilder();
@@ -315,7 +313,7 @@ public class ShuffleUtils {
     if (!sendEmptyPartitionDetails || outputGenerated) {
       String host = context.getExecutionContext().getHostName();
       ByteBuffer shuffleMetadata = context
-          .getServiceProviderMetaData(ShuffleUtils.SHUFFLE_HANDLER_SERVICE_ID);
+          .getServiceProviderMetaData(auxiliaryService);
       int shufflePort = ShuffleUtils.deserializeShuffleProviderMetaData(shuffleMetadata);
       payloadBuilder.setHost(host);
       payloadBuilder.setPort(shufflePort);
@@ -401,12 +399,13 @@ public class ShuffleUtils {
    * @param numPhysicalOutputs
    * @param pathComponent
    * @param partitionStats
+   * @param auxiliaryService
    * @throws IOException
    */
   public static void generateEventOnSpill(List<Event> eventList, boolean finalMergeEnabled,
       boolean isLastEvent, OutputContext context, int spillId, TezSpillRecord spillRecord,
       int numPhysicalOutputs, boolean sendEmptyPartitionDetails, String pathComponent,
-      @Nullable long[] partitionStats, boolean reportDetailedPartitionStats, Deflater deflater)
+      @Nullable long[] partitionStats, boolean reportDetailedPartitionStats, String auxiliaryService, Deflater deflater)
       throws IOException {
     Preconditions.checkArgument(eventList != null, "EventList can't be null");
 
@@ -424,7 +423,7 @@ public class ShuffleUtils {
 
     ByteBuffer payload = generateDMEPayload(sendEmptyPartitionDetails, numPhysicalOutputs,
         spillRecord, context, spillId,
-        finalMergeEnabled, isLastEvent, pathComponent, deflater);
+        finalMergeEnabled, isLastEvent, pathComponent, auxiliaryService, deflater);
 
     if (finalMergeEnabled || isLastEvent) {
       VertexManagerEvent vmEvent = generateVMEvent(context, partitionStats,
@@ -450,6 +449,8 @@ public class ShuffleUtils {
     // multiple events would end up adding up to final output size.
     // This is needed for auto-reduce parallelism to work properly.
     vmBuilder.setOutputSize(outputSize);
+    vmBuilder.setNumRecord(context.getCounters().findCounter(TaskCounter.OUTPUT_RECORDS).getValue()
+     + context.getCounters().findCounter(TaskCounter.OUTPUT_LARGE_RECORDS).getValue());
 
     //set partition stats
     if (sizePerPartition != null && sizePerPartition.length > 0) {
@@ -516,50 +517,102 @@ public class ShuffleUtils {
     return builder.build();
   }
 
-  /**
-   * Log individual fetch complete event.
-   * This log information would be used by tez-tool/perf-analzyer/shuffle tools for mining
-   * - amount of data transferred between source to destination machine
-   * - time taken to transfer data between source to destination machine
-   * - details on DISK/DISK_DIRECT/MEMORY based shuffles
-   *
-   * @param log
-   * @param millis
-   * @param bytesCompressed
-   * @param bytesDecompressed
-   * @param outputType
-   * @param srcAttemptIdentifier
-   */
-  public static void logIndividualFetchComplete(Logger log, long millis, long
-      bytesCompressed,
-      long bytesDecompressed, String outputType, InputAttemptIdentifier srcAttemptIdentifier) {
-    double rate = 0;
-    if (millis != 0) {
-      rate = bytesCompressed / ((double) millis / 1000);
-      rate = rate / (1024 * 1024);
-    }
-    log.info(
-        "Completed fetch for attempt: "
-            + toShortString(srcAttemptIdentifier)
-            +" to " + outputType +
-            ", csize=" + bytesCompressed + ", dsize=" + bytesDecompressed +
-            ", EndTime=" + System.currentTimeMillis() + ", TimeTaken=" + millis + ", Rate=" +
-            MBPS_FORMAT.get().format(rate) + " MB/s");
-  }
+  public static class FetchStatsLogger {
+    private final Logger activeLogger;
+    private final Logger aggregateLogger;
+    private final AtomicLong logCount = new AtomicLong();
+    private final AtomicLong compressedSize = new AtomicLong();
+    private final AtomicLong decompressedSize = new AtomicLong();
+    private final AtomicLong totalTime = new AtomicLong();
 
-  private static String toShortString(InputAttemptIdentifier inputAttemptIdentifier) {
-    StringBuilder sb = new StringBuilder();
-    sb.append("{");
-    sb.append(inputAttemptIdentifier.getInputIdentifier());
-    sb.append(", ").append(inputAttemptIdentifier.getAttemptNumber());
-    sb.append(", ").append(inputAttemptIdentifier.getPathComponent());
-    if (inputAttemptIdentifier.getFetchTypeInfo()
-        != InputAttemptIdentifier.SPILL_INFO.FINAL_MERGE_ENABLED) {
-      sb.append(", ").append(inputAttemptIdentifier.getFetchTypeInfo().ordinal());
-      sb.append(", ").append(inputAttemptIdentifier.getSpillEventId());
+    public FetchStatsLogger(Logger activeLogger, Logger aggregateLogger) {
+      this.activeLogger = activeLogger;
+      this.aggregateLogger = aggregateLogger;
     }
-    sb.append("}");
-    return sb.toString();
+
+
+    private static StringBuilder toShortString(InputAttemptIdentifier inputAttemptIdentifier, StringBuilder sb) {
+      sb.append("{");
+      sb.append(inputAttemptIdentifier.getInputIdentifier());
+      sb.append(", ").append(inputAttemptIdentifier.getAttemptNumber());
+      sb.append(", ").append(inputAttemptIdentifier.getPathComponent());
+      if (inputAttemptIdentifier.getFetchTypeInfo()
+          != InputAttemptIdentifier.SPILL_INFO.FINAL_MERGE_ENABLED) {
+        sb.append(", ").append(inputAttemptIdentifier.getFetchTypeInfo().ordinal());
+        sb.append(", ").append(inputAttemptIdentifier.getSpillEventId());
+      }
+      sb.append("}");
+      return sb;
+    }
+    /**
+     * Log individual fetch complete event.
+     * This log information would be used by tez-tool/perf-analzyer/shuffle tools for mining
+     * - amount of data transferred between source to destination machine
+     * - time taken to transfer data between source to destination machine
+     * - details on DISK/DISK_DIRECT/MEMORY based shuffles
+     *
+     * @param millis
+     * @param bytesCompressed
+     * @param bytesDecompressed
+     * @param outputType
+     * @param srcAttemptIdentifier
+     */
+    public void logIndividualFetchComplete(long millis, long bytesCompressed,
+        long bytesDecompressed, String outputType, InputAttemptIdentifier srcAttemptIdentifier) {
+
+      if (activeLogger.isInfoEnabled()) {
+        long wholeMBs = 0;
+        long partialMBs = 0;
+        if (millis != 0) {
+          // fast math is done using integer math to avoid double to string conversion
+          // calculate B/s * 100 to preserve MBs precision to two decimal places
+          // multiply numerator by 100000 (2^5 * 5^5) and divide denominator by MB (2^20)
+          // simply fraction to protect ourselves from overflow by factoring out 2^5
+          wholeMBs = (bytesCompressed * 3125) / (millis * 32768);
+          partialMBs = wholeMBs % 100;
+          wholeMBs /= 100;
+        }
+        StringBuilder sb = new StringBuilder("Completed fetch for attempt: ");
+        toShortString(srcAttemptIdentifier, sb);
+        sb.append(" to ");
+        sb.append(outputType);
+        sb.append(", csize=");
+        sb.append(bytesCompressed);
+        sb.append(", dsize=");
+        sb.append(bytesDecompressed);
+        sb.append(", EndTime=");
+        sb.append(System.currentTimeMillis());
+        sb.append(", TimeTaken=");
+        sb.append(millis);
+        sb.append(", Rate=");
+        sb.append(wholeMBs);
+        sb.append(".");
+        MBPS_FAST_FORMAT.get().format(partialMBs, sb);
+        sb.append(" MB/s");
+        activeLogger.info(sb.toString());
+      } else {
+        long currentCount, currentCompressedSize, currentDecompressedSize, currentTotalTime;
+        synchronized (this) {
+          currentCount = logCount.incrementAndGet();
+          currentCompressedSize = compressedSize.addAndGet(bytesCompressed);
+          currentDecompressedSize = decompressedSize.addAndGet(bytesDecompressed);
+          currentTotalTime = totalTime.addAndGet(millis);
+          if (currentCount % 1000 == 0) {
+            compressedSize.set(0);
+            decompressedSize.set(0);
+            totalTime.set(0);
+          }
+        }
+        if (currentCount % 1000 == 0) {
+          double avgRate = currentTotalTime == 0 ? 0
+              : currentCompressedSize / (double)currentTotalTime / 1000 / 1024 / 1024;
+          aggregateLogger.info("Completed {} fetches, stats for last 1000 fetches: "
+              + "avg csize: {}, avg dsize: {}, avgTime: {}, avgRate: {}", currentCount,
+              currentCompressedSize / 1000, currentDecompressedSize / 1000, currentTotalTime / 1000,
+              MBPS_FORMAT.get().format(avgRate));
+        }
+      }
+    }
   }
 
   /**
@@ -569,54 +622,13 @@ public class ShuffleUtils {
    * @return HttpConnectionParams
    */
   public static HttpConnectionParams getHttpConnectionParams(Configuration conf) {
-    int connectionTimeout =
-        conf.getInt(TezRuntimeConfiguration.TEZ_RUNTIME_SHUFFLE_CONNECT_TIMEOUT,
-            TezRuntimeConfiguration.TEZ_RUNTIME_SHUFFLE_STALLED_COPY_TIMEOUT_DEFAULT);
+    return TezRuntimeUtils.getHttpConnectionParams(conf);
+  }
 
-    int readTimeout = conf.getInt(TezRuntimeConfiguration.TEZ_RUNTIME_SHUFFLE_READ_TIMEOUT,
-            TezRuntimeConfiguration.TEZ_RUNTIME_SHUFFLE_READ_TIMEOUT_DEFAULT);
-
-    int bufferSize = conf.getInt(TezRuntimeConfiguration.TEZ_RUNTIME_SHUFFLE_BUFFER_SIZE,
-            TezRuntimeConfiguration.TEZ_RUNTIME_SHUFFLE_BUFFER_SIZE_DEFAULT);
-
-    boolean keepAlive = conf.getBoolean(TezRuntimeConfiguration.TEZ_RUNTIME_SHUFFLE_KEEP_ALIVE_ENABLED,
-            TezRuntimeConfiguration.TEZ_RUNTIME_SHUFFLE_KEEP_ALIVE_ENABLED_DEFAULT);
-
-    int keepAliveMaxConnections = conf.getInt(
-            TezRuntimeConfiguration.TEZ_RUNTIME_SHUFFLE_KEEP_ALIVE_MAX_CONNECTIONS,
-            TezRuntimeConfiguration.TEZ_RUNTIME_SHUFFLE_KEEP_ALIVE_MAX_CONNECTIONS_DEFAULT);
-
-    if (keepAlive) {
-      System.setProperty("sun.net.http.errorstream.enableBuffering", "true");
-      System.setProperty("http.maxConnections", String.valueOf(keepAliveMaxConnections));
-    }
-
-    boolean sslShuffle = conf.getBoolean(TezRuntimeConfiguration.TEZ_RUNTIME_SHUFFLE_ENABLE_SSL,
-        TezRuntimeConfiguration.TEZ_RUNTIME_SHUFFLE_ENABLE_SSL_DEFAULT);
-
-    if (sslShuffle) {
-      if (sslFactory == null) {
-        synchronized (HttpConnectionParams.class) {
-          //Create sslFactory if it is null or if it was destroyed earlier
-          if (sslFactory == null || sslFactory.getKeystoresFactory().getTrustManagers() == null) {
-            sslFactory =
-                new SSLFactory(org.apache.hadoop.security.ssl.SSLFactory.Mode.CLIENT, conf);
-            try {
-              sslFactory.init();
-            } catch (Exception ex) {
-              sslFactory.destroy();
-              sslFactory = null;
-              throw new RuntimeException(ex);
-            }
-          }
-        }
-      }
-    }
-
-    HttpConnectionParams httpConnParams = new HttpConnectionParams(keepAlive,
-        keepAliveMaxConnections, connectionTimeout, readTimeout, bufferSize, sslShuffle,
-        sslFactory);
-    return httpConnParams;
+  public static boolean isTezShuffleHandler(Configuration config) {
+    return config.get(TezConfiguration.TEZ_AM_SHUFFLE_AUXILIARY_SERVICE_ID,
+        TezConfiguration.TEZ_AM_SHUFFLE_AUXILIARY_SERVICE_ID_DEFAULT).
+        contains("tez");
   }
 }
 

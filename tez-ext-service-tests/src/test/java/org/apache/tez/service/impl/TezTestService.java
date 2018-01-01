@@ -23,6 +23,9 @@ import com.google.common.base.Preconditions;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.service.AbstractService;
 import org.apache.hadoop.util.StringUtils;
+import org.apache.tez.dag.api.TezConfiguration;
+import org.apache.tez.common.TezExecutors;
+import org.apache.tez.common.TezSharedExecutor;
 import org.apache.tez.dag.api.TezException;
 import org.apache.tez.service.ContainerRunner;
 import org.apache.tez.shufflehandler.ShuffleHandler;
@@ -45,6 +48,8 @@ public class TezTestService extends AbstractService implements ContainerRunner {
 
 
   private final AtomicReference<InetSocketAddress> address = new AtomicReference<InetSocketAddress>();
+
+  private final TezExecutors sharedExecutor;
 
   public TezTestService(Configuration conf, int numExecutors, long memoryAvailable, String[] localDirs) {
     super(TezTestService.class.getSimpleName());
@@ -73,8 +78,9 @@ public class TezTestService extends AbstractService implements ContainerRunner {
     this.shuffleHandlerConf.set(ShuffleHandler.SHUFFLE_HANDLER_LOCAL_DIRS, StringUtils.arrayToString(localDirs));
 
     this.server = new TezTestServiceProtocolServerImpl(this, address);
+    this.sharedExecutor = new TezSharedExecutor(conf);
     this.containerRunner = new ContainerRunnerImpl(numExecutors, localDirs, address,
-        memoryAvailableBytes);
+        memoryAvailableBytes, sharedExecutor);
   }
 
   @Override
@@ -86,7 +92,9 @@ public class TezTestService extends AbstractService implements ContainerRunner {
   @Override
   public void serviceStart() throws Exception {
     ShuffleHandler.initializeAndStart(shuffleHandlerConf);
-    containerRunner.setShufflePort(ShuffleHandler.get().getPort());
+    String auxiliaryService = getConfig().get(TezConfiguration.TEZ_AM_SHUFFLE_AUXILIARY_SERVICE_ID,
+        TezConfiguration.TEZ_AM_SHUFFLE_AUXILIARY_SERVICE_ID_DEFAULT);
+    containerRunner.setShufflePort(auxiliaryService, ShuffleHandler.get().getPort());
     server.start();
     containerRunner.start();
   }
@@ -95,6 +103,7 @@ public class TezTestService extends AbstractService implements ContainerRunner {
     containerRunner.stop();
     server.stop();
     ShuffleHandler.get().stop();
+    sharedExecutor.shutdownNow();
   }
 
   public InetSocketAddress getListenerAddress() {

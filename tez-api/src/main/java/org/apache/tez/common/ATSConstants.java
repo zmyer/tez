@@ -47,6 +47,7 @@ public class ATSConstants {
   public static final String USER = "user";
   public static final String CALLER_CONTEXT_ID = "callerId";
   public static final String CALLER_CONTEXT_TYPE = "callerType";
+  public static final String CALLER_CONTEXT = "callerContext";
 
   /* Keys used in other info */
   public static final String APP_SUBMIT_TIME = "appSubmitTime";
@@ -55,6 +56,7 @@ public class ATSConstants {
   public static final String DAG_PLAN = "dagPlan";
   public static final String DAG_NAME = "dagName";
   public static final String DAG_STATE = "dagState";
+  public static final String DAG_QUEUE_NAME = "queueName";
   public static final String DAG_AM_WEB_SERVICE_VERSION = "amWebServiceVersion";
   public static final String RECOVERY_FAILURE_REASON = "recoveryFailureReason";
   public static final String VERTEX_NAME = "vertexName";

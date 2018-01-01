@@ -52,7 +52,9 @@ import org.apache.hadoop.yarn.api.ApplicationConstants.Environment;
 import org.apache.tez.common.ContainerContext;
 import org.apache.tez.common.ContainerTask;
 import org.apache.tez.common.TezCommonUtils;
+import org.apache.tez.common.TezExecutors;
 import org.apache.tez.common.TezLocalResource;
+import org.apache.tez.common.TezSharedExecutor;
 import org.apache.tez.common.TezTaskUmbilicalProtocol;
 import org.apache.tez.common.TezUtilsInternal;
 import org.apache.tez.common.counters.Limits;
@@ -120,6 +122,7 @@ public class TezChild {
   private int taskCount = 0;
   private TezVertexID lastVertexID;
   private final HadoopShim hadoopShim;
+  private final TezExecutors sharedExecutor;
 
   public TezChild(Configuration conf, String host, int port, String containerIdentifier,
       String tokenIdentifier, int appAttemptNumber, String workingDir, String[] localDirs,
@@ -141,6 +144,7 @@ public class TezChild {
     this.user = user;
     this.updateSysCounters = updateSysCounters;
     this.hadoopShim = hadoopShim;
+    this.sharedExecutor = new TezSharedExecutor(defaultConf);
 
     getTaskMaxSleepTime = defaultConf.getInt(
         TezConfiguration.TEZ_TASK_GET_TASK_SLEEP_INTERVAL_MS_MAX,
@@ -173,7 +177,9 @@ public class TezChild {
     UserGroupInformation taskOwner = UserGroupInformation.createRemoteUser(tokenIdentifier);
     Token<JobTokenIdentifier> jobToken = TokenCache.getSessionToken(credentials);
 
-    serviceConsumerMetadata.put(TezConstants.TEZ_SHUFFLE_HANDLER_SERVICE_ID,
+    String auxiliaryService = defaultConf.get(TezConfiguration.TEZ_AM_SHUFFLE_AUXILIARY_SERVICE_ID,
+        TezConfiguration.TEZ_AM_SHUFFLE_AUXILIARY_SERVICE_ID_DEFAULT);
+    serviceConsumerMetadata.put(auxiliaryService,
         TezCommonUtils.convertJobTokenToBytes(jobToken));
 
     if (umbilical == null) {
@@ -258,7 +264,7 @@ public class TezChild {
             localDirs, containerTask.getTaskSpec(), appAttemptNumber,
             serviceConsumerMetadata, serviceProviderEnvMap, startedInputsMap, taskReporter,
             executor, objectRegistry, pid, executionContext, memAvailable, updateSysCounters,
-            hadoopShim);
+            hadoopShim, sharedExecutor);
         boolean shouldDie;
         try {
           TaskRunner2Result result = taskRunner.run();
@@ -458,6 +464,8 @@ public class TezChild {
     // TODO TEZ-1233. This needs to be moved over the wire rather than localizing the file
     // for each and every task, and reading it back from disk. Also needs to be per vertex.
     Limits.setConfiguration(conf);
+
+    TezUtilsInternal.setSecurityUtilConfigration(LOG, conf);
 
     // singleton of ObjectRegistry for this JVM
     ObjectRegistryImpl objectRegistry = new ObjectRegistryImpl();

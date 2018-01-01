@@ -22,6 +22,7 @@ import java.nio.ByteBuffer;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 import static org.mockito.Matchers.any;
 import static org.mockito.Matchers.anyInt;
 import static org.mockito.Mockito.*;
@@ -51,14 +52,22 @@ import com.google.protobuf.ByteString;
 
 import org.apache.commons.lang.StringUtils;
 import org.apache.hadoop.io.DataOutputBuffer;
+import org.apache.hadoop.yarn.api.records.LocalResource;
 import org.apache.tez.common.DrainDispatcher;
 import org.apache.tez.common.TezCommonUtils;
 import org.apache.tez.common.counters.Limits;
 import org.apache.tez.common.counters.TezCounters;
 import org.apache.tez.dag.api.TezConstants;
+import org.apache.tez.dag.api.records.DAGProtos.PlanLocalResource;
+import org.apache.tez.dag.api.records.DAGProtos.PlanLocalResourceType;
+import org.apache.tez.dag.api.records.DAGProtos.PlanLocalResourceVisibility;
+import org.apache.tez.dag.app.dag.event.TaskAttemptEventSubmitted;
 import org.apache.tez.dag.app.dag.event.TaskEventTAFailed;
 import org.apache.tez.dag.app.dag.event.TaskEventTALaunched;
 import org.apache.tez.dag.app.dag.event.TaskEventTASucceeded;
+import org.apache.tez.dag.app.rm.AMSchedulerEvent;
+import org.apache.tez.dag.app.rm.AMSchedulerEventTALaunchRequest;
+import org.apache.tez.dag.app.rm.AMSchedulerEventType;
 import org.apache.tez.hadoop.shim.DefaultHadoopShim;
 import org.apache.tez.runtime.api.TaskFailureType;
 import org.apache.tez.runtime.api.VertexStatistics;
@@ -254,6 +263,7 @@ public class TestVertexImpl {
   private TaskEventDispatcher taskEventDispatcher;
   private VertexEventDispatcher vertexEventDispatcher;
   private DagEventDispatcher dagEventDispatcher;
+  private AMSchedulerEventDispatcher amSchedulerEventDispatcher;
   private HistoryEventHandler historyEventHandler;
   private StateChangeNotifierForTest updateTracker;
   private static TaskSpecificLaunchCmdOption taskSpecificLaunchCmdOption;
@@ -411,6 +421,14 @@ public class TestVertexImpl {
         count = eventCount.get(event.getType()) + 1;
       }
       eventCount.put(event.getType(), count);
+    }
+  }
+
+  private class AMSchedulerEventDispatcher implements  EventHandler<AMSchedulerEvent> {
+    List<AMSchedulerEvent> events = new ArrayList<>();
+
+    public void handle(AMSchedulerEvent event) {
+      events.add(event);
     }
   }
 
@@ -1619,6 +1637,16 @@ public class TestVertexImpl {
     LOG.info("Setting up dag plan");
     DAGPlan dag = DAGPlan.newBuilder()
         .setName("testverteximpl")
+        .addLocalResource(
+          PlanLocalResource.newBuilder()
+            .setName("dag lr")
+            .setUri("dag ir uri")
+            .setSize(1)
+            .setTimeStamp(1)
+            .setType(PlanLocalResourceType.FILE)
+            .setVisibility(PlanLocalResourceVisibility.APPLICATION)
+            .build()
+        )
         .addVertex(
           VertexPlan.newBuilder()
             .setName("vertex1")
@@ -1636,6 +1664,16 @@ public class TestVertexImpl {
                 .setMemoryMb(1024)
                 .setJavaOpts("")
                 .setTaskModule("x1.y1")
+                .addLocalResource(
+                  PlanLocalResource.newBuilder()
+                    .setName("vertex lr")
+                    .setUri("vertex ir uri")
+                    .setSize(1)
+                    .setTimeStamp(1)
+                    .setType(PlanLocalResourceType.FILE)
+                    .setVisibility(PlanLocalResourceVisibility.APPLICATION)
+                    .build()
+                )
                 .build()
             )
             .addOutEdgeId("e1")
@@ -2474,6 +2512,13 @@ public class TestVertexImpl {
     DAG dag = mock(DAG.class);
     doReturn(ugi).when(dag).getDagUGI();
     doReturn(dagName).when(dag).getName();
+    Map<String, LocalResource> localResources = new HashMap<>();
+    for (PlanLocalResource planLR : dagPlan.getLocalResourceList()) {
+      localResources.put(planLR.getName(),
+        DagTypeConverters.convertPlanLocalResourceToLocalResource(planLR));
+    }
+    when(dag.getLocalResources()).thenReturn(localResources);
+
     doReturn(appAttemptId).when(appContext).getApplicationAttemptId();
     doReturn(appAttemptId.getApplicationId()).when(appContext).getApplicationID();
     doReturn(dag).when(appContext).getCurrentDAG();
@@ -2559,6 +2604,8 @@ public class TestVertexImpl {
     dispatcher.register(VertexEventType.class, vertexEventDispatcher);
     dagEventDispatcher = new DagEventDispatcher();
     dispatcher.register(DAGEventType.class, dagEventDispatcher);
+    amSchedulerEventDispatcher = new AMSchedulerEventDispatcher();
+    dispatcher.register(AMSchedulerEventType.class, amSchedulerEventDispatcher);
     dispatcher.init(conf);
     dispatcher.start();
   }
@@ -3003,6 +3050,21 @@ public class TestVertexImpl {
     fromEventId = eventInfo.getNextFromEventId();
     Assert.assertEquals(12, fromEventId);
     Assert.assertEquals(1, eventInfo.getEvents().size());
+    Assert.assertEquals(EventType.INPUT_FAILED_EVENT, eventInfo.getEvents().get(0).getEventType());
+
+    // Let failed task send more event
+    for (int i=11; i<14; ++i) {
+      v4.handle(new VertexEventRouteEvent(v4.getVertexId(), Collections.singletonList(
+          new TezEvent(DataMovementEvent.create(0, null),
+              new EventMetaData(EventProducerConsumerType.OUTPUT, v3.getName(), v3.getName(), v3TaId)))));
+    }
+    dispatcher.await();
+    // 11 events + 1 INPUT_FAILED_EVENT.
+    // Events sent out later by failed tasks should not be available.
+    Assert.assertEquals(12, v4.getOnDemandRouteEvents().size());
+
+    fromEventId = 0;
+    eventInfo = v4.getTaskAttemptTezEvents(v4TaId, fromEventId, 0, 100);
     Assert.assertEquals(EventType.INPUT_FAILED_EVENT, eventInfo.getEvents().get(0).getEventType());
   }
   
@@ -3590,7 +3652,8 @@ public class TestVertexImpl {
     containers.addContainerIfNew(container, 0, 0, 0);
     doReturn(containers).when(appContext).getAllContainers();
 
-    ta.handle(new TaskAttemptEventStartedRemotely(ta.getID(), contId, null));
+    ta.handle(new TaskAttemptEventSubmitted(ta.getID(), contId));
+    ta.handle(new TaskAttemptEventStartedRemotely(ta.getID()));
     Assert.assertEquals(TaskAttemptStateInternal.RUNNING, ta.getInternalState());
     ta.handle(new TaskAttemptEventAttemptFailed(ta.getID(), TaskAttemptEventType.TA_FAILED,
         TaskFailureType.NON_FATAL,
@@ -3624,7 +3687,8 @@ public class TestVertexImpl {
     containers.addContainerIfNew(container, 0, 0, 0);
     doReturn(containers).when(appContext).getAllContainers();
 
-    ta.handle(new TaskAttemptEventStartedRemotely(ta.getID(), contId, null));
+    ta.handle(new TaskAttemptEventSubmitted(ta.getID(), contId));
+    ta.handle(new TaskAttemptEventStartedRemotely(ta.getID()));
     Assert.assertEquals(TaskAttemptStateInternal.RUNNING, ta.getInternalState());
 
     ta.handle(new TaskAttemptEventAttemptFailed(ta.getID(), TaskAttemptEventType.TA_FAILED,
@@ -3660,7 +3724,8 @@ public class TestVertexImpl {
     containers.addContainerIfNew(container, 0, 0, 0);
     doReturn(containers).when(appContext).getAllContainers();
 
-    ta.handle(new TaskAttemptEventStartedRemotely(ta.getID(), contId, null));
+    ta.handle(new TaskAttemptEventSubmitted(ta.getID(), contId));
+    ta.handle(new TaskAttemptEventStartedRemotely(ta.getID()));
     Assert.assertEquals(TaskAttemptStateInternal.RUNNING, ta.getInternalState());
 
     ta.handle(new TaskAttemptEventAttemptFailed(ta.getID(), TaskAttemptEventType.TA_FAILED,
@@ -3907,6 +3972,44 @@ public class TestVertexImpl {
     dispatcher.await();
     Assert.assertEquals(VertexState.SUCCEEDED, v.getState());
 
+  }
+
+  @Test (timeout = 5000)
+  public void testTerminatingVertexForTaskComplete() throws Exception {
+    setupPreDagCreation();
+    dagPlan = createSamplerDAGPlan(false);
+    setupPostDagCreation();
+    VertexImpl vertex = spy(vertices.get("A"));
+    initVertex(vertex);
+    startVertex(vertex);
+    vertex.handle(new VertexEventTermination(vertex.getVertexId(), VertexTerminationCause.INTERNAL_ERROR));
+    dispatcher.await();
+    Assert.assertTrue(vertex.inTerminalState());
+    for (String diagnostic : vertex.getDiagnostics()) {
+      if (diagnostic.contains("Invalid event")) {
+        fail("Unexpected Invalid event transition!");
+      }
+    }
+  }
+
+  @Test (timeout = 5000)
+  public void testTerminatingVertexForVComplete() throws Exception {
+    setupPreDagCreation();
+    dagPlan = createSamplerDAGPlan(false);
+    setupPostDagCreation();
+    VertexImpl vertex = spy(vertices.get("A"));
+    initVertex(vertex);
+    startVertex(vertex);
+    vertex.handle(new VertexEventTermination(vertex.getVertexId(), VertexTerminationCause.INTERNAL_ERROR));
+    vertex.handle(new VertexEvent(
+        vertex.getVertexId(), VertexEventType.V_COMPLETED));
+    dispatcher.await();
+    Assert.assertTrue(vertex.inTerminalState());
+    for (String diagnostic : vertex.getDiagnostics()) {
+      if (diagnostic.contains("Invalid event")) {
+        fail("Unexpected Invalid event transition!");
+      }
+    }
   }
 
   @Test(timeout = 5000)
@@ -5892,10 +5995,10 @@ public class TestVertexImpl {
         VertexEventType.V_INIT));
     dispatcher.await();
     
-    Assert.assertNull(vA.getGroupInputSpecList(0));
-    Assert.assertNull(vB.getGroupInputSpecList(0));
+    Assert.assertNull(vA.getGroupInputSpecList());
+    Assert.assertNull(vB.getGroupInputSpecList());
     
-    List<GroupInputSpec> groupInSpec = vC.getGroupInputSpecList(0);
+    List<GroupInputSpec> groupInSpec = vC.getGroupInputSpecList();
     Assert.assertEquals(1, groupInSpec.size());
     Assert.assertEquals("Group", groupInSpec.get(0).getGroupName());
     assertTrue(groupInSpec.get(0).getGroupVertices().contains("A"));
@@ -6766,7 +6869,8 @@ public class TestVertexImpl {
   }
 
   @InterfaceAudience.Private
-  public static class VertexManagerWithException extends RootInputVertexManager{
+  public static class VertexManagerWithException extends
+      ImmediateStartVertexManager{
 
     public static enum VMExceptionLocation {
       NoExceptionDoReconfigure,
@@ -7040,14 +7144,16 @@ public class TestVertexImpl {
     Assert.assertEquals(v.getLastTaskFinishTime(), -1);
 
     taskAttempt0.handle(new TaskAttemptEventSchedule(taskAttemptId0, 0, 0));
-    taskAttempt0.handle(new TaskAttemptEventStartedRemotely(taskAttemptId0, contId, null));
+    taskAttempt0.handle(new TaskAttemptEventSubmitted(taskAttemptId0, contId));
+    taskAttempt0.handle(new TaskAttemptEventStartedRemotely(taskAttemptId0));
     taskAttempt0.handle(new TaskAttemptEvent(taskAttemptId0, TaskAttemptEventType.TA_DONE));
     //task0.handle(new TaskEventTAUpdate(taskAttemptId0, TaskEventType.T_ATTEMPT_SUCCEEDED));
 
     Assert.assertEquals(v.getLastTaskFinishTime(), -1);
 
     taskAttempt1.handle(new TaskAttemptEventSchedule(taskAttemptId1, 0, 0));
-    taskAttempt1.handle(new TaskAttemptEventStartedRemotely(taskAttemptId1, contId, null));
+    taskAttempt1.handle(new TaskAttemptEventSubmitted(taskAttemptId1, contId));
+    taskAttempt1.handle(new TaskAttemptEventStartedRemotely(taskAttemptId1));
     taskAttempt1.handle(new TaskAttemptEvent(taskAttemptId1, TaskAttemptEventType.TA_DONE));
     //task1.handle(new TaskEventTAUpdate(taskAttemptId1, TaskEventType.T_ATTEMPT_SUCCEEDED));
 
@@ -7057,4 +7163,21 @@ public class TestVertexImpl {
     Assert.assertTrue(v.getLastTaskFinishTime() > 0);
   }
 
+  @Test(timeout = 5000)
+  public void testPickupDagLocalResourceOnScheduleTask() {
+    initAllVertices(VertexState.INITED);
+    VertexImpl v1 = vertices.get("vertex1");
+    startVertex(v1);
+
+    TezTaskAttemptID taskAttemptId0 = TezTaskAttemptID.getInstance(v1.getTask(0).getTaskId(), 0);
+    TaskAttemptImpl ta0 = (TaskAttemptImpl) v1.getTask(0).getAttempt(taskAttemptId0);
+    ta0.handle(new TaskAttemptEventSchedule(taskAttemptId0, 1, 1));
+
+    dispatcher.await();
+    Assert.assertEquals(1, amSchedulerEventDispatcher.events.size());
+    AMSchedulerEventTALaunchRequest launchRequestEvent = (AMSchedulerEventTALaunchRequest) amSchedulerEventDispatcher.events.get(0);
+    Map<String, LocalResource> localResourceMap = launchRequestEvent.getContainerContext().getLocalResources();
+    Assert.assertTrue(localResourceMap.containsKey("dag lr"));
+    Assert.assertTrue(localResourceMap.containsKey("vertex lr"));
+  }
 }

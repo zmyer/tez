@@ -20,6 +20,7 @@ package org.apache.tez.client;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.URISyntaxException;
@@ -38,7 +39,9 @@ import java.util.Vector;
 import java.util.Map.Entry;
 
 import com.google.common.base.Strings;
+import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.commons.lang.StringUtils;
+import org.apache.commons.math3.util.Precision;
 import org.apache.tez.common.JavaOptsChecker;
 import org.apache.tez.dag.api.records.DAGProtos.AMPluginDescriptorProto;
 import org.apache.tez.serviceplugins.api.ServicePluginsDescriptor;
@@ -667,7 +670,9 @@ public class TezClientUtils {
     // provide this to AuxServices running on the AM node - in case tasks run within the AM,
     // and no other task runs on this node.
     Map<String, ByteBuffer> serviceData = new HashMap<String, ByteBuffer>();
-    serviceData.put(TezConstants.TEZ_SHUFFLE_HANDLER_SERVICE_ID,
+    String auxiliaryService = conf.get(TezConfiguration.TEZ_AM_SHUFFLE_AUXILIARY_SERVICE_ID,
+        TezConfiguration.TEZ_AM_SHUFFLE_AUXILIARY_SERVICE_ID_DEFAULT);
+    serviceData.put(auxiliaryService,
         TezCommonUtils.serializeServiceData(TokenCache.getSessionToken(amLaunchCredentials)));
 
     // Setup ContainerLaunchContext for AM container
@@ -963,8 +968,15 @@ public class TezClientUtils {
         || (resource.getMemory() <= 0)) {
       return javaOpts;
     }
-    if (maxHeapFactor <= 0 || maxHeapFactor >= 1) {
+
+    if ((maxHeapFactor <= 0 && !Precision.equals(maxHeapFactor, -1, 0.01)) || maxHeapFactor >= 1) {
       return javaOpts;
+    }
+
+    if (Precision.equals(maxHeapFactor, -1, 0.01)) {
+      maxHeapFactor = resource.getMemory() < TezConstants.TEZ_CONTAINER_SMALL_SLAB_BOUND_MB
+        ? TezConstants.TEZ_CONTAINER_MAX_JAVA_HEAP_FRACTION_SMALL_SLAB
+        : TezConstants.TEZ_CONTAINER_MAX_JAVA_HEAP_FRACTION_LARGE_SLAB;
     }
     int maxMemory = (int)(resource.getMemory() * maxHeapFactor);
     maxMemory = maxMemory <= 0 ? 1 : maxMemory;
@@ -1069,4 +1081,28 @@ public class TezClientUtils {
     }
   }
 
+
+  public static byte[] getLocalSha(Path path, Configuration conf) throws IOException {
+    InputStream is = null;
+    try {
+      is = FileSystem.getLocal(conf).open(path);
+      return DigestUtils.sha256(is);
+    } finally {
+      if (is != null) {
+        is.close();
+      }
+    }
+  }
+
+  public static byte[] getResourceSha(URI uri, Configuration conf) throws IOException {
+    InputStream is = null;
+    try {
+      is = FileSystem.get(uri, conf).open(new Path(uri));
+      return DigestUtils.sha256(is);
+    } finally {
+      if (is != null) {
+        is.close();
+      }
+    }
+  }
 }

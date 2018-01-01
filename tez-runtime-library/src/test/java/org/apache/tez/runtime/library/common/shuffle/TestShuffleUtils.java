@@ -4,7 +4,6 @@ import com.google.common.collect.Lists;
 import com.google.protobuf.ByteString;
 
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.fs.ChecksumException;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.DataOutputBuffer;
@@ -17,6 +16,7 @@ import org.apache.tez.common.TezCommonUtils;
 import org.apache.tez.common.TezRuntimeFrameworkConfigs;
 import org.apache.tez.common.TezUtilsInternal;
 import org.apache.tez.common.counters.TezCounters;
+import org.apache.tez.dag.api.TezConfiguration;
 import org.apache.tez.runtime.api.Event;
 import org.apache.tez.runtime.api.InputContext;
 import org.apache.tez.runtime.api.OutputContext;
@@ -24,7 +24,8 @@ import org.apache.tez.runtime.api.events.CompositeDataMovementEvent;
 import org.apache.tez.runtime.api.events.VertexManagerEvent;
 import org.apache.tez.runtime.api.impl.ExecutionContextImpl;
 import org.apache.tez.runtime.library.api.TezRuntimeConfiguration;
-import org.apache.tez.runtime.library.common.sort.impl.IFileOutputStream;
+import org.apache.tez.runtime.library.common.InputAttemptIdentifier;
+import org.apache.tez.runtime.library.common.shuffle.ShuffleUtils.FetchStatsLogger;
 import org.apache.tez.runtime.library.common.sort.impl.TezIndexRecord;
 import org.apache.tez.runtime.library.common.sort.impl.TezSpillRecord;
 import org.apache.tez.runtime.library.partitioner.HashPartitioner;
@@ -32,6 +33,7 @@ import org.apache.tez.runtime.library.shuffle.impl.ShuffleUserPayloads;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
+import org.mockito.Matchers;
 import org.slf4j.Logger;
 
 import java.io.ByteArrayInputStream;
@@ -42,13 +44,16 @@ import java.io.OutputStream;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.BitSet;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.List;
-import java.util.Random;
 
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.anyInt;
+import static org.mockito.Mockito.anyString;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -69,10 +74,6 @@ import static org.mockito.Mockito.when;
  * limitations under the License.
  */
 public class TestShuffleUtils {
-
-  private static final String HOST = "localhost";
-  private static final int PORT = 8080;
-  private static final String PATH_COMPONENT = "attempt";
 
   private OutputContext outputContext;
   private Configuration conf;
@@ -100,7 +101,8 @@ public class TestShuffleUtils {
     serviceProviderMetaData.writeInt(80);
     doReturn(ByteBuffer.wrap(serviceProviderMetaData.getData())).when(outputContext)
         .getServiceProviderMetaData
-            (ShuffleUtils.SHUFFLE_HANDLER_SERVICE_ID);
+            (conf.get(TezConfiguration.TEZ_AM_SHUFFLE_AUXILIARY_SERVICE_ID,
+                TezConfiguration.TEZ_AM_SHUFFLE_AUXILIARY_SERVICE_ID_DEFAULT));
 
 
     doReturn(1).when(outputContext).getTaskVertexIndex();
@@ -115,8 +117,8 @@ public class TestShuffleUtils {
 
   @Before
   public void setup() throws Exception {
-    outputContext = createTezOutputContext();
     conf = new Configuration();
+    outputContext = createTezOutputContext();
     conf.set("fs.defaultFS", "file:///");
     localFs = FileSystem.getLocal(conf);
 
@@ -137,11 +139,10 @@ public class TestShuffleUtils {
     TezSpillRecord spillRecord = new TezSpillRecord(numPartitions);
     long startOffset = 0;
     long partLen = 200; //compressed
-    Random rnd = new Random();
     for(int i=0;i<numPartitions;i++) {
-      long rawLen = rnd.nextLong();
+      long rawLen = ThreadLocalRandom.current().nextLong(100, 200);
       if (i % 2  == 0 || allEmptyPartitions) {
-        rawLen = 6; //indicates empty partition
+        rawLen = 0; //indicates empty partition, see TEZ-3605
       }
       TezIndexRecord indexRecord = new TezIndexRecord(startOffset, rawLen, partLen);
       startOffset += partLen;
@@ -161,9 +162,12 @@ public class TestShuffleUtils {
     int spillId = 0;
     int physicalOutputs = 10;
     String pathComponent = "/attempt_x_y_0/file.out";
+    String auxiliaryService = conf.get(TezConfiguration.TEZ_AM_SHUFFLE_AUXILIARY_SERVICE_ID,
+        TezConfiguration.TEZ_AM_SHUFFLE_AUXILIARY_SERVICE_ID_DEFAULT);
+
     ShuffleUtils.generateEventOnSpill(events, finalMergeEnabled, isLastEvent,
         outputContext, spillId, new TezSpillRecord(indexFile, conf),
-            physicalOutputs, true, pathComponent, null, false, TezCommonUtils.newBestCompressionDeflater());
+            physicalOutputs, true, pathComponent, null, false, auxiliaryService, TezCommonUtils.newBestCompressionDeflater());
 
     Assert.assertTrue(events.size() == 1);
     Assert.assertTrue(events.get(0) instanceof CompositeDataMovementEvent);
@@ -198,11 +202,13 @@ public class TestShuffleUtils {
     int spillId = 0;
     int physicalOutputs = 10;
     String pathComponent = "/attempt_x_y_0/file.out";
+    String auxiliaryService = conf.get(TezConfiguration.TEZ_AM_SHUFFLE_AUXILIARY_SERVICE_ID,
+        TezConfiguration.TEZ_AM_SHUFFLE_AUXILIARY_SERVICE_ID_DEFAULT);
 
     //normal code path where we do final merge all the time
     ShuffleUtils.generateEventOnSpill(events, finalMergeEnabled, isLastEvent,
         outputContext, spillId, new TezSpillRecord(indexFile, conf),
-            physicalOutputs, true, pathComponent, null, false, TezCommonUtils.newBestCompressionDeflater());
+            physicalOutputs, true, pathComponent, null, false, auxiliaryService, TezCommonUtils.newBestCompressionDeflater());
 
     Assert.assertTrue(events.size() == 2); //one for VM
     Assert.assertTrue(events.get(0) instanceof VertexManagerEvent);
@@ -239,11 +245,13 @@ public class TestShuffleUtils {
     int spillId = 0;
     int physicalOutputs = 10;
     String pathComponent = "/attempt_x_y_0/file.out";
+    String auxiliaryService = conf.get(TezConfiguration.TEZ_AM_SHUFFLE_AUXILIARY_SERVICE_ID,
+        TezConfiguration.TEZ_AM_SHUFFLE_AUXILIARY_SERVICE_ID_DEFAULT);
 
     //normal code path where we do final merge all the time
     ShuffleUtils.generateEventOnSpill(events, finalMergeDisabled, isLastEvent,
         outputContext, spillId, new TezSpillRecord(indexFile, conf),
-            physicalOutputs, true, pathComponent, null, false, TezCommonUtils.newBestCompressionDeflater());
+            physicalOutputs, true, pathComponent, null, false, auxiliaryService, TezCommonUtils.newBestCompressionDeflater());
 
     Assert.assertTrue(events.size() == 2); //one for VM
     Assert.assertTrue(events.get(0) instanceof VertexManagerEvent);
@@ -284,7 +292,7 @@ public class TestShuffleUtils {
     byte[] header = new byte[] { (byte) 'T', (byte) 'I', (byte) 'F', (byte) 1};
     try {
       ShuffleUtils.shuffleToMemory(new byte[1024], new ByteArrayInputStream(header),
-          1024, 128, mockCodec, false, 0, mock(Logger.class), "identifier");
+          1024, 128, mockCodec, false, 0, mock(Logger.class), null);
       Assert.fail("shuffle was supposed to throw!");
     } catch (IOException e) {
       Assert.assertTrue(e.getCause() instanceof InternalError);
@@ -301,16 +309,38 @@ public class TestShuffleUtils {
     ByteArrayInputStream in = new ByteArrayInputStream(bogusData);
     ByteArrayOutputStream baos = new ByteArrayOutputStream();
     ShuffleUtils.shuffleToDisk(baos, "somehost", in,
-        bogusData.length, 2000, mock(Logger.class), "identifier", false, 0, false);
+        bogusData.length, 2000, mock(Logger.class), null, false, 0, false);
     Assert.assertArrayEquals(bogusData, baos.toByteArray());
 
     // verify sending same stream of zeroes with validation generates an exception
     in.reset();
     try {
       ShuffleUtils.shuffleToDisk(mock(OutputStream.class), "somehost", in,
-          bogusData.length, 2000, mock(Logger.class), "identifier", false, 0, true);
+          bogusData.length, 2000, mock(Logger.class), null, false, 0, true);
       Assert.fail("shuffle was supposed to throw!");
     } catch (IOException e) {
     }
+  }
+
+  @Test
+  public void testFetchStatsLogger() throws Exception {
+    Logger activeLogger = mock(Logger.class);
+    Logger aggregateLogger = mock(Logger.class);
+    FetchStatsLogger logger = new FetchStatsLogger(activeLogger, aggregateLogger);
+
+    InputAttemptIdentifier ident = new InputAttemptIdentifier(1, 1);
+    when(activeLogger.isInfoEnabled()).thenReturn(false);
+    for (int i = 0; i < 1000; i++) {
+      logger.logIndividualFetchComplete(10, 100, 1000, "testType", ident);
+    }
+    verify(activeLogger, times(0)).info(anyString());
+    verify(aggregateLogger, times(1)).info(anyString(), Matchers.<Object[]>anyVararg());
+
+    when(activeLogger.isInfoEnabled()).thenReturn(true);
+    for (int i = 0; i < 1000; i++) {
+      logger.logIndividualFetchComplete(10, 100, 1000, "testType", ident);
+    }
+    verify(activeLogger, times(1000)).info(anyString());
+    verify(aggregateLogger, times(1)).info(anyString(), Matchers.<Object[]>anyVararg());
   }
 }

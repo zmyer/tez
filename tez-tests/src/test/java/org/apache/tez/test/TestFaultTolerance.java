@@ -59,6 +59,7 @@ import org.apache.tez.test.dag.TwoLevelsFailingDAG;
 import org.junit.AfterClass;
 import org.junit.Assert;
 import org.junit.Ignore;
+import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
@@ -72,7 +73,8 @@ public class TestFaultTolerance {
   protected static MiniDFSCluster dfsCluster;
   
   private static TezClient tezSession = null;
-  
+  private static TezConfiguration tezConf;
+
   @BeforeClass
   public static void setup() throws Exception {
     LOG.info("Starting mini clusters");
@@ -97,13 +99,14 @@ public class TestFaultTolerance {
           .valueOf(new Random().nextInt(100000))));
       TezClientUtils.ensureStagingDirExists(conf, remoteStagingDir);
       
-      TezConfiguration tezConf = new TezConfiguration(miniTezCluster.getConfig());
+      tezConf = new TezConfiguration(miniTezCluster.getConfig());
       tezConf.set(TezConfiguration.TEZ_AM_STAGING_DIR,
           remoteStagingDir.toString());
       tezConf.setBoolean(TezConfiguration.TEZ_AM_NODE_BLACKLISTING_ENABLED, false);
       tezConf.setDouble(TezConfiguration.TEZ_TASK_MAX_ALLOWED_OUTPUT_FAILURES_FRACTION, 0.4);
       tezConf.setInt(TezConfiguration.TEZ_AM_MAX_ALLOWED_TIME_FOR_TASK_READ_ERROR_SEC, 3);
       tezConf.setInt(TezConfiguration.TEZ_TASK_AM_HEARTBEAT_INTERVAL_MS, 100);
+      tezConf.setLong(TezConfiguration.TEZ_AM_SLEEP_TIME_BEFORE_EXIT_MILLIS, 500);
 
       tezSession = TezClient.create("TestFaultTolerance", tezConf, true);
       tezSession.start();
@@ -124,6 +127,11 @@ public class TestFaultTolerance {
       dfsCluster.shutdown();
       dfsCluster = null;
     }
+  }
+
+  @Before
+  public void checkSessionStatus() {
+    // TODO restart session if it crashed due to some test error
   }
 
   void runDAGAndVerify(DAG dag, DAGStatus.State finalState) throws Exception {
@@ -160,7 +168,40 @@ public class TestFaultTolerance {
       Assert.assertTrue(Joiner.on(":").join(dagStatus.getDiagnostics()).contains(diagnostics));
     }
   }
-  
+
+  @Test (timeout=600000)
+  public void testSessionStopped() throws Exception {
+    Configuration testConf = new Configuration(false);
+
+    testConf.setBoolean(TestProcessor.getVertexConfName(
+        TestProcessor.TEZ_FAILING_PROCESSOR_DO_FAIL, "v1"), true);
+    testConf.set(TestProcessor.getVertexConfName(
+        TestProcessor.TEZ_FAILING_PROCESSOR_FAILING_TASK_INDEX, "v1"), "0");
+    testConf.setInt(TestProcessor.getVertexConfName(
+        TestProcessor.TEZ_FAILING_PROCESSOR_FAILING_UPTO_TASK_ATTEMPT, "v1"), 0);
+
+    // verify value at v2 task1
+    testConf.set(TestProcessor.getVertexConfName(
+        TestProcessor.TEZ_FAILING_PROCESSOR_VERIFY_TASK_INDEX, "v2"), "1");
+
+    testConf.setInt(TestProcessor.getVertexConfName(
+        TestProcessor.TEZ_FAILING_PROCESSOR_VERIFY_VALUE, "v2", 1), 4);
+    DAG dag = SimpleTestDAG.createDAG("testBasicTaskFailure", testConf);
+    tezSession.waitTillReady();
+
+    DAGClient dagClient = tezSession.submitDAG(dag);
+    dagClient.waitForCompletion();
+    // kill the session now
+    tezSession.stop();
+
+    // Check if killing DAG does not throw any exception
+    dagClient.tryKillDAG();
+
+    // restart the session for rest of the tests
+    tezSession = TezClient.create("TestFaultTolerance", tezConf, true);
+    tezSession.start();
+  }
+
   @Test (timeout=60000)
   public void testBasicSuccessScatterGather() throws Exception {
     DAG dag = SimpleTestDAG.createDAG("testBasicSuccessScatterGather", null);
@@ -817,8 +858,11 @@ public class TestFaultTolerance {
     String[] sourceVertices = {"v1", "v2"};
     CartesianProductConfig cartesianProductConfig =
       new CartesianProductConfig(Arrays.asList(sourceVertices));
+    TezConfiguration tezConf = new TezConfiguration();
+    tezConf.setInt(CartesianProductVertexManager.TEZ_CARTESIAN_PRODUCT_NUM_PARTITIONS, 1);
+    tezConf.setBoolean(CartesianProductVertexManager.TEZ_CARTESIAN_PRODUCT_ENABLE_GROUPING, false);
     UserPayload cartesianProductPayload =
-      cartesianProductConfig.toUserPayload(new TezConfiguration());
+      cartesianProductConfig.toUserPayload(tezConf);
 
     v3.setVertexManagerPlugin(
       VertexManagerPluginDescriptor.create(CartesianProductVertexManager.class.getName())
